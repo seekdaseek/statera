@@ -1,0 +1,14 @@
+# The TypeScript engine already owns src/ and test/, so Solidity lives in contracts/.
+[profile.default]
+src = "contracts"
+test = "contracts/test"
+out = "out"
+libs = ["lib"]
+solc = "0.8.28"
+optimizer = true
+optimizer_runs = 20000
+via_ir = false
+gas_reports = ["StateraFeed", "CollateralGate"]
+
+[rpc_endpoints]
+xlayer = "https://rpc.xlayer.tech"

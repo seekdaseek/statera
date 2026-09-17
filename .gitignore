@@ -1,2 +1,10 @@
 node_modules/
 dist/
+# Foundry build output
+out/
+cache/
+# The publisher key. Never commit; 0600 on disk.
+.deploykey
+*.key
+# Keeper run log
+keeper.log

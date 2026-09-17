@@ -187,3 +187,197 @@ All verified on-chain: `symbol()`/`decimals()` read from each token, and
 - **Uniswap v4.** The v4 `PoolManager`
   (`0x360e68faccca8ca495c1b759fd9eee466db9fb32`) holds wSPYx and wNVDAx. v4
   liquidity is not read, so reported depth is a floor, not a ceiling.
+
+---
+
+# Phase 2 — the onchain half
+
+A feed contract on X Layer, a keeper that posts the engine's numbers, and an example
+lender that consumes them. Nothing is deployed yet; everything below is exercised on
+a fork.
+
+```bash
+export PATH="$HOME/.foundry/bin:$PATH"
+forge test                                   # 85 Solidity tests
+forge test --fork-url https://rpc.xlayer.tech # the same 85, against real chain state
+npm test                                     # 46 TypeScript tests
+node script/fork-e2e.mjs                     # live engine -> forked feed -> gate
+node script/gas-estimate.mjs                 # measured cost, priced in OKB and USD
+node script/keeper-dryrun-fork.mjs           # the keeper, signing nothing
+```
+
+## StateraFeed
+
+Keyed by `(token, form, sizeTier)`. `token` is the raw xStock address, which is the
+asset identity for both forms; `form` is `Raw` or `Wrapped`. Rows pack into two slots.
+
+```solidity
+enum Form { Raw, Wrapped }
+enum Status { Unmeasured, Measured, Absent }
+
+struct Row {
+    uint128 markUsd;        // USD, 6 dp, per one token of `form`
+    uint128 realisableUsd;  // USD, 6 dp, proceeds of selling the tier
+    uint128 fillableUsd;    // USD, 6 dp, meaningful only when Absent
+    int32   gapBps;         // negative means worse than the mark
+    uint8   status;
+    uint40  engineBlock;    // the X Layer block the engine read
+    uint48  publishedAt;    // block.timestamp of the post
+}
+
+function post(uint40 engineBlock, RowInput[] calldata rows) external;   // publisher only
+function latest(bytes32 rowKey) external view returns (Row memory);
+function latestFor(address token, Form form, uint32 sizeTierUsd) external view returns (Row memory);
+function isFresh(bytes32 rowKey, uint256 maxAgeSeconds) external view returns (bool);
+function maxFillableUsd(address token, Form form) external view returns (uint256);
+function maxFillableUsdFresh(address token, Form form, uint256 maxAgeSeconds) external view returns (uint256);
+function tiers(address token, Form form) external view returns (uint32[] memory);
+function expectedGapBps(uint32 sizeTierUsd, uint128 realisableUsd) external pure returns (int256);
+```
+
+One run posts in one transaction and emits one `RowPosted` per row plus a `RunPosted`,
+so the whole series is reconstructible from logs by anyone who does not trust storage.
+
+**The gap is not forgeable.** A `Measured` row's `gapBps` is recomputed from
+`realisableUsd` against the tier's face value and must agree within
+`GAP_TOLERANCE_BPS` (1 bp, for the publisher's rounding). A publisher cannot post
+honest values with a flattering gap, nor a gap with no values behind it:
+
+| status | must carry | must not carry |
+|---|---|---|
+| `Measured` | mark, realisable, and a gap that agrees with them | — |
+| `Absent` | `fillableUsd` > 0 | any gap |
+| `Unmeasured` | nothing at all | mark, realisable, fillable, or gap |
+
+A genuinely zero gap is legal and is not mistaken for a missing one — that case is
+pinned by a test, because inferring "no gap" from `gapBps == 0` would have been the
+easy wrong design.
+
+**The publisher is immutable.** No owner, no upgrade path, no transfer function. A
+posted row can be superseded but never edited, and nobody including the deployer can
+repoint the feed. The cost is that a lost publisher key ends the feed; that is
+accepted, because a feed a stranger can take over is not worth reading.
+
+`isFresh` returns false for `Unmeasured` however recently it was posted: freshness is
+a claim about usable numbers, not about keeper liveness. `maxFillableUsd` counts a
+`Measured` tier at its full face value, an `Absent` tier at only the part that filled,
+and an `Unmeasured` tier at nothing.
+
+## CollateralGate
+
+```solidity
+function borrowLimitUsd(address token, Form form, uint256 amountUsd, uint16 ltvBps) external view returns (uint256);
+function realisableValueUsd(address token, Form form, uint256 amountUsd) external view returns (uint256);
+function haircutBps(address token, Form form, uint256 amountUsd) external view returns (uint256);
+function coveringTierUsd(address token, Form form, uint256 amountUsd) external view returns (uint32);
+function tryBorrowLimitUsd(...) external view returns (Refusal, uint256 limitUsd, uint32 tierUsd, uint128 fillableUsd);
+```
+
+It never reads the mark. Named refusals, every one tested:
+
+| error | when |
+|---|---|
+| `UnknownSeries` | the feed has never published this asset in this form |
+| `NoTierCoversAmount` | every measured tier is smaller than the pledge |
+| `RowUnmeasured` | the covering tier was not measured — unknown, not worthless |
+| `CollateralNotSellableAtSize` | the pools cannot fill that size; carries `fillableUsd` |
+| `RowStale` | the row is older than `maxAgeSeconds` |
+| `ZeroAmount`, `InvalidLtv` | bad inputs |
+
+**Tier selection rounds up.** A $40,000 pledge is priced off the $100,000 row, not the
+$10,000 one, because the cost of selling $40,000 is bounded by the cost of selling
+$100,000 and never by the cost of selling $10,000. Rounding down would flatter the
+borrower with slippage from a trade a tenth the size.
+
+Measured live through the gate, $100,000 of wNVDAx at 50% LTV: the realisable value is
+$98,149.45 and the limit $49,074.72, where a mark-based lender would have extended
+$50,000. That ~$925 is the phantom credit statera exists to remove.
+
+## Keeper
+
+`src/pack.ts` converts a report into rows; `src/keeper.ts` decides and posts.
+
+- **Never posts a zero.** `Unmeasured` rows are dropped, not written as zeros, because
+  a zero meaning "unknown" is the confusion statera exists to remove. The previous row
+  then ages out and is refused as stale, which is the honest outcome. If a run yields
+  no postable rows, nothing is sent at all.
+- **Posts when it is worth paying for:** any value moved more than 5 bps against what
+  is onchain, a status changed, a key was never published, or the last post is older
+  than 30 minutes (the heartbeat, so a quiet market is distinguishable from a dead
+  keeper).
+- **`gapBps` is derived from the integer**, the same truncating division the contract
+  uses — not rounded from the engine's float. Deriving it any other way would make
+  posts revert at rounding boundaries in production and nowhere else.
+- **Dry-run by default.** Sending needs both `--post` and a readable key. The key is
+  read from a 0600 file into memory and handed to viem; it is never in a command line,
+  a log, or another file.
+- **Two locks.** `bin/keeper.sh` wraps the run in `flock(1)` on the VPS; the script
+  also takes its own lockfile, because macOS has no `flock` and a double post wastes
+  real OKB. A held lock logs one line and exits 0, since an overrun is ordinary.
+
+Env: `STATERA_FEED` (required), `STATERA_RPC` (engine reads), `STATERA_CHAIN_RPC`
+(where the feed lives, defaults to `STATERA_RPC`), `STATERA_KEY`, `STATERA_LOCK`.
+
+## Mark fungibility — answered
+
+**Yes for the networks.** OKX's own documentation, fetched without a login or key:
+[okx.com/help/unified-tokenized-stocks](https://www.okx.com/help/unified-tokenized-stocks)
+answers "Which network and token can I deposit?" with "Currently, xStocks tokens on
+Solana and Xlayer", and "withdrawals are paid out in the xStocks token… an xAAPL
+balance is converted back into AAPLx on withdrawal". The listing announcement
+[okx-to-list-unified-tokenized-stocks-for-spot-trading](https://www.okx.com/help/okx-to-list-unified-tokenized-stocks-for-spot-trading)
+states "supports deposits and withdrawals of xStocks on the Solana and X Layer
+networks" and names XSPY, XNVDA and XTSLA in Batch 2 with withdrawals opening
+08:00 UTC, 16 Jul 2026. A later batch announcement repeats the same two networks, so
+no third has been added.
+
+**No for the contract addresses.** No OKX deposit or withdrawal surface prints a
+contract address — the help and announcement HTML contains no `0x` addresses at all.
+The one endpoint that returns a per-network `ctAddr`, `/api/v5/asset/currencies`, is
+401 without an API key. OKX Wallet does display each address as NVDAx / TSLAx / SPYx
+on X Layer, so the chain XNVDA → NVDAx → `0xc845…` is joined across two OKX surfaces
+rather than asserted on one. **Settles with one authenticated call:**
+`GET /api/v5/asset/currencies?ccy=XNVDA` with a free read-only key returns `chain`,
+`ctAddr`, `canDep` and `canWd` per network.
+
+**One claim tested and rejected.** OKX's docs describe balances as *shares* converted
+to tokens on withdrawal, which suggests OKX might quote per share rather than per
+token. Measured at block 70,888,320, it does not:
+
+| | OKX mid | pool spot (wrapper) | multiplier | OKX / pool | OKX / (pool ÷ mult) |
+|---|---|---|---|---|---|
+| NVDA | 219.3950 | 219.7412 | 1.001701197 | 0.998425 | **1.000123** |
+| TSLA | 367.1400 | 367.2467 | 1.000000000 | 0.999709 | 0.999709 |
+| SPY | 761.4850 | 765.7632 | 1.005714560 | 0.994413 | **1.000096** |
+
+NVDA and SPY agree to within 2 bps once the multiplier is divided out, despite their
+multipliers differing by 46 bps — which only cancels if OKX quotes **per raw token**.
+Under the per-share reading they would diverge by 40 bps. So phase 1's assignment
+(mark_raw = OKX, mark_wrapped = OKX × multiplier) is correct. TSLA's −29 bps is
+ordinary venue basis; its multiplier is exactly 1, so it cannot distinguish the two.
+
+## Measured cost
+
+X Layer gas 0.02 gwei, OKB $112.05, measured on a fork:
+
+| item | gas | OKB | USD |
+|---|---|---|---|
+| deploy StateraFeed | 1,619,646 | 0.000032393 | $0.0036 |
+| deploy CollateralGate | 1,007,649 | 0.000020153 | $0.0023 |
+| post 18 rows, first write | 1,752,948 | 0.000035059 | $0.0039 |
+| post 18 rows, steady state | 423,174 | 0.000008463 | $0.0010 |
+
+Seven days of posting: $0.32 at the 30-minute heartbeat, $1.91 at a 5-minute cron,
+$9.56 at a paranoid 1-minute cadence.
+
+## Not settled in phase 2
+
+- **Nothing is deployed.** Every number above comes from a fork. Mainnet behaviour is
+  UNTESTED until phase 3.
+- **The keeper has never sent a transaction.** The signing path is written and the
+  publisher check is exercised on a fork, but `--post` has never been used against
+  mainnet.
+- **No audit.** The contracts are reviewed and tested, not audited.
+- **The `Refusal` enum returned by `tryBorrowLimitUsd` for a zero amount or a bad LTV
+  is `NoTierCoversAmount`**, which is imprecise. The strict form reverts with the
+  correct `ZeroAmount` / `InvalidLtv`.
