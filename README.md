@@ -5,6 +5,20 @@ by side: an **independent mark**, the **realisable value** of selling a given si
 into live onchain liquidity, and the **gap in basis points** — each with a status
 of `measured`, `absent` or `unmeasured`.
 
+## Live on X Layer
+
+| contract | address | Sourcify |
+|---|---|---|
+| StateraFeed | [`0x879d9a5d1Fa688DDf94b13361490746Faf8b784C`](https://www.oklink.com/x-layer/address/0x879d9a5d1fa688ddf94b13361490746faf8b784c) | [exact_match](https://repo.sourcify.dev/196/0x879d9a5d1Fa688DDf94b13361490746Faf8b784C) |
+| CollateralGate — **current**, maxAge 7200s | [`0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA`](https://www.oklink.com/x-layer/address/0x12c23e1cce2ee3246a3161852d2ca7d6cfe4b9da) | [exact_match](https://repo.sourcify.dev/196/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA) |
+| CollateralGate — superseded, maxAge 1800s | [`0x5Ab5C851246c7056B90245af6639e9446BF1Ad79`](https://www.oklink.com/x-layer/address/0x5ab5c851246c7056b90245af6639e9446bf1ad79) | [exact_match](https://repo.sourcify.dev/196/0x5Ab5C851246c7056B90245af6639e9446BF1Ad79) |
+
+Chain 196. The publisher is immutable and there is no admin, so these cannot be
+repointed, upgraded or taken over by anyone, including the deployer. Point new
+integrations at the **7200-second gate**; the 1800-second one is left live for
+anything already using it, and simply refuses sooner. Full record, with transaction
+hashes and how each was verified, in [DEPLOYMENT.md](DEPLOYMENT.md).
+
 Read-only. It signs nothing, sends nothing and holds no keys. The only JSON-RPC
 methods used are `eth_chainId`, `eth_blockNumber`, `eth_call`, `eth_getStorageAt`
 and (tests only) `eth_getLogs`.
@@ -301,10 +315,10 @@ $50,000. That ~$925 is the phantom credit statera exists to remove.
   a zero meaning "unknown" is the confusion statera exists to remove. The previous row
   then ages out and is refused as stale, which is the honest outcome. If a run yields
   no postable rows, nothing is sent at all.
-- **Posts when it is worth paying for:** any value moved more than 5 bps against what
-  is onchain, a status changed, a key was never published, or the last post is older
-  than 30 minutes (the heartbeat, so a quiet market is distinguishable from a dead
-  keeper).
+- **Posts when it is worth paying for**, under the budget policy in `src/policy.ts`
+  (below). The short version: a 100-minute heartbeat so a quiet market is
+  distinguishable from a dead keeper, plus a 100 bps movement trigger, both bounded by
+  a cooldown, a daily cap, a balance floor and a cost cap.
 - **`gapBps` is derived from the integer**, the same truncating division the contract
   uses — not rounded from the engine's float. Deriving it any other way would make
   posts revert at rounding boundaries in production and nowhere else.
@@ -316,7 +330,54 @@ $50,000. That ~$925 is the phantom credit statera exists to remove.
   real OKB. A held lock logs one line and exits 0, since an overrun is ordinary.
 
 Env: `STATERA_FEED` (required), `STATERA_RPC` (engine reads), `STATERA_CHAIN_RPC`
-(where the feed lives, defaults to `STATERA_RPC`), `STATERA_KEY`, `STATERA_LOCK`.
+(where the feed lives, defaults to `STATERA_RPC`), `STATERA_KEY`, `STATERA_LOCK`,
+`STATERA_STATE` (daily counter), `STATERA_KEEPER_LOG`, `STATERA_TG_ENV`.
+
+### The spending policy
+
+The publisher is funded once and will not be topped up, so when to post is a spending
+question before it is a freshness question. `src/policy.ts` is pure — no clock, no
+network, no filesystem — and every branch returns a machine-readable code as well as a
+sentence, because a refusal nobody can grep is indistinguishable from a keeper that
+died. `test/policy.test.ts` tests each rule at its boundary.
+
+| rule | value | why |
+|---|---|---|
+| heartbeat | post at 100 min or older | matches the 7200-second gate with room for a missed run |
+| movement | post when a measured value moves more than 100 bps | smaller moves are not worth a transaction |
+| cooldown | never within 30 min of the last post | one flapping row cannot post every cron run |
+| daily cap | 18 posts per UTC day, hard | bounds the worst case a bug can spend in a day |
+| balance floor | stop below 0.0003 OKB | leaves the tail unspent instead of dribbling it away |
+| cost cap | refuse above 3x the steady-state cost | catches a gas spike and an oversized run alike, since it compares cost, not gas |
+
+Two details that are decisions rather than details:
+
+**The order is deliberate.** The two solvency guards run before the two cadence rules,
+so a due heartbeat can never override the balance floor or a gas spike. Running dry is
+worse than a stale row, because a stale row is refused honestly by the gate while an
+empty wallet cannot be refused at all.
+
+**An unestimatable post counts as unaffordable**, not as free. A node that will not
+simulate the post may also be about to revert it, and guessing the cost is how a
+wallet empties.
+
+Only *measured* rows contribute movement. An absent row's numbers describe a partial
+fill the gate refuses anyway, so paying gas to refresh one buys nothing; a row that
+appears or changes status is counted separately, because those are shape changes a
+consumer cannot infer from a price.
+
+The daily counter lives in a local JSON file rather than being read back from the
+chain: `eth_getLogs` is capped at 100-block windows on the public RPC and a UTC day is
+about 86,400 blocks. A missing or corrupt counter reads back as a fresh day — refusing
+to run because a counter file is unparseable would take the feed down over a
+formatting problem.
+
+Three things alert to Telegram, once per kind per day: crossing the balance floor, a
+gas spike that suppressed a post, and a post that failed. Credentials are read from a
+file at call time, never printed, never logged, never put on a command line; the
+token is redacted out of any error string before it can reach a log, because the
+failing URL contains it. Alerting is best-effort — a keeper that dies because Telegram
+is down is worse than one that posts quietly.
 
 ## Mark fungibility — answered
 

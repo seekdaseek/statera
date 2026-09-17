@@ -25,16 +25,29 @@ import { createPublicClient, createWalletClient, http, defineChain, type Hex } f
 import { privateKeyToAccount } from "viem/accounts";
 import { Rpc } from "./rpc.js";
 import { run as runEngine } from "./engine.js";
-import { packReport, toTuple, moveBps, type PackedRow } from "./pack.js";
+import { packReport, toTuple } from "./pack.js";
+import {
+  decidePolicy, computeMovement, utcDay, STEADY_STATE_COST_WEI, COST_CAP_WEI,
+  BALANCE_FLOOR_WEI, HEARTBEAT_SECONDS as POLICY_HEARTBEAT, MOVE_BPS as POLICY_MOVE_BPS,
+  MOVE_COOLDOWN_SECONDS, MAX_POSTS_PER_UTC_DAY, type AlertKind, type OnchainRow,
+} from "./policy.js";
+import { loadState, saveState, rollDay, alertDue, markAlerted } from "./state.js";
+import { sendAlert } from "./alert.js";
 import { DEFAULT_RPC } from "./config.js";
 
 /* ----------------------------------------------------------------- config */
 
-export const MOVE_BPS = 5;
-export const HEARTBEAT_SECONDS = 30 * 60;
+// The spending rules live in policy.ts, pure and tested on their own. These
+// re-exports keep the old import sites working and give the tests one place to read
+// the live numbers from.
+export {
+  decidePolicy, computeMovement, POLICY_HEARTBEAT as HEARTBEAT_SECONDS,
+  POLICY_MOVE_BPS as MOVE_BPS, MOVE_COOLDOWN_SECONDS, MAX_POSTS_PER_UTC_DAY,
+  BALANCE_FLOOR_WEI, COST_CAP_WEI, STEADY_STATE_COST_WEI,
+};
 
 const LOCK_PATH = process.env["STATERA_LOCK"] ?? "/tmp/statera-keeper.lock";
-const LOG_PATH = process.env["STATERA_KEEPER_LOG"] ?? "/Volumes/D/statera/keeper.log";
+const LOG_PATH = process.env["STATERA_KEEPER_LOG"] ?? "/var/log/statera-keeper.log";
 const LOCK_STALE_MS = 15 * 60 * 1000;
 
 export const xlayer = defineChain({
@@ -43,6 +56,7 @@ export const xlayer = defineChain({
   nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
   rpcUrls: { default: { http: [DEFAULT_RPC] } },
 });
+
 
 /* -------------------------------------------------------------------- abi */
 
@@ -99,6 +113,7 @@ export const FEED_ABI = [
   { type: "function", name: "lastEngineBlock", stateMutability: "view", inputs: [], outputs: [{ type: "uint40" }] },
   { type: "function", name: "publisher", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "runCount", stateMutability: "view", inputs: [], outputs: [{ type: "uint64" }] },
+  { type: "function", name: "lastEngineBlock", stateMutability: "view", inputs: [], outputs: [{ type: "uint40" }] },
 ] as const;
 
 /* ------------------------------------------------------------------- lock */
@@ -161,69 +176,6 @@ export function acquireLock(path = LOCK_PATH, attempt = 0): () => void {
   };
 }
 
-/* --------------------------------------------------------------- decision */
-
-export interface Decision {
-  post: boolean;
-  reason: string;
-  movedRows: { label: string; field: string; bps: number }[];
-  ageSeconds: number | null;
-}
-
-export function decide(
-  packed: PackedRow[],
-  onchain: Map<string, { markUsd: bigint; realisableUsd: bigint; fillableUsd: bigint; status: number }>,
-  lastPublishedAt: number,
-  nowSeconds: number,
-): Decision {
-  const moved: { label: string; field: string; bps: number }[] = [];
-  let newKey = false;
-  let statusChange = false;
-
-  for (const r of packed) {
-    const k = `${r.token.toLowerCase()}/${r.form}/${r.sizeTierUsd}`;
-    const prev = onchain.get(k);
-    if (!prev || prev.status === 0) {
-      newKey = true;
-      moved.push({ label: r.label, field: "new", bps: Number.POSITIVE_INFINITY });
-      // NOTE: Infinity is not representable in JSON. The log maps it to the string
-      // "unbounded" before writing, so a reader never sees a bare null here.
-      continue;
-    }
-    if (prev.status !== r.status) {
-      statusChange = true;
-      moved.push({ label: r.label, field: "status", bps: Number.POSITIVE_INFINITY });
-      continue;
-    }
-    for (const [field, a, b] of [
-      ["realisableUsd", prev.realisableUsd, r.realisableUsd],
-      ["markUsd", prev.markUsd, r.markUsd],
-      ["fillableUsd", prev.fillableUsd, r.fillableUsd],
-    ] as const) {
-      const bps = moveBps(a, b);
-      if (bps > MOVE_BPS) moved.push({ label: r.label, field, bps });
-    }
-  }
-
-  const age = lastPublishedAt === 0 ? null : nowSeconds - lastPublishedAt;
-  const heartbeatDue = age === null || age >= HEARTBEAT_SECONDS;
-
-  if (newKey) return { post: true, reason: "a key has never been published", movedRows: moved, ageSeconds: age };
-  if (statusChange) return { post: true, reason: "a row changed status", movedRows: moved, ageSeconds: age };
-  if (moved.length > 0) {
-    return { post: true, reason: `${moved.length} value(s) moved more than ${MOVE_BPS} bps`, movedRows: moved, ageSeconds: age };
-  }
-  if (heartbeatDue) {
-    return {
-      post: true,
-      reason: age === null ? "no post on record" : `heartbeat: last post ${age}s ago`,
-      movedRows: moved,
-      ageSeconds: age,
-    };
-  }
-  return { post: false, reason: `nothing moved more than ${MOVE_BPS} bps and last post was ${age}s ago`, movedRows: moved, ageSeconds: age };
-}
-
 /* ------------------------------------------------------------------- cost */
 
 async function okbUsd(): Promise<number | null> {
@@ -259,8 +211,7 @@ async function main(): Promise<void> {
   const feedAddress = (process.env["STATERA_FEED"] ?? "") as Hex;
   // Two RPCs, because they are two different jobs. STATERA_RPC is where the engine
   // reads pool state from; STATERA_CHAIN_RPC is where the feed lives and the
-  // transaction goes. They default to the same endpoint, and separating them is what
-  // lets a fork test post locally while still measuring the real chain.
+  // transaction goes.
   const rpcUrl = process.env["STATERA_RPC"] ?? DEFAULT_RPC;
   const chainRpcUrl = process.env["STATERA_CHAIN_RPC"] ?? rpcUrl;
   // Secrets never live inside a git working tree; the default is outside the repo.
@@ -268,9 +219,8 @@ async function main(): Promise<void> {
 
   if (!feedAddress) throw new Error("set STATERA_FEED to the deployed StateraFeed address");
 
-  // A held lock means the previous run is still working. That is ordinary under a
-  // 5-minute cron, so it logs one line and exits cleanly rather than throwing a
-  // stack trace into the cron mail every time a run overruns its slot.
+  // A held lock means the previous run is still working — ordinary under a 10-minute
+  // cron when a run overruns, so it logs one line and exits 0 rather than throwing.
   let release: () => void;
   try {
     release = acquireLock();
@@ -279,6 +229,21 @@ async function main(): Promise<void> {
     return;
   }
   const started = Date.now();
+  const nowSec = Math.floor(Date.now() / 1000);
+  let state = rollDay(loadState(nowSec), nowSec);
+
+  /** Send an alert at most once per UTC day per kind, and never fail the run over it. */
+  const alert = async (kind: AlertKind, message: string): Promise<void> => {
+    if (!alertDue(state, kind, nowSec)) {
+      logLine({ event: "alert-suppressed", kind, reason: "already sent today" });
+      return;
+    }
+    const r = await sendAlert(kind, message);
+    state = markAlerted(state, kind, nowSec);
+    saveState(state);
+    logLine({ event: "alert", kind, sent: r.sent, detail: r.detail });
+  };
+
   try {
     const pub = createPublicClient({ chain: xlayer, transport: http(chainRpcUrl, { batch: { batchSize: 10 } }) });
 
@@ -286,18 +251,8 @@ async function main(): Promise<void> {
     const report = await runEngine(new Rpc({ url: rpcUrl }));
     const packed = packReport(report);
 
-    if (packed.rows.length === 0) {
-      logLine({
-        event: "skip",
-        reason: "engine produced no postable rows",
-        engineBlock: packed.engineBlock,
-        dropped: packed.dropped,
-      });
-      return;
-    }
-
-    // 2. Compare against what is already onchain.
-    const onchain = new Map<string, { markUsd: bigint; realisableUsd: bigint; fillableUsd: bigint; status: number }>();
+    // 2. What is onchain, plus the numbers the policy needs.
+    const onchain = new Map<string, OnchainRow>();
     for (const r of packed.rows) {
       const got: any = await pub.readContract({
         address: feedAddress,
@@ -315,125 +270,170 @@ async function main(): Promise<void> {
     const lastPublishedAt = Number(
       await pub.readContract({ address: feedAddress, abi: FEED_ABI, functionName: "lastPublishedAt" }),
     );
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const decision = decide(packed.rows, onchain, lastPublishedAt, nowSeconds);
+    const publisher = (await pub.readContract({
+      address: feedAddress,
+      abi: FEED_ABI,
+      functionName: "publisher",
+    })) as Hex;
+    const balanceWei = await pub.getBalance({ address: publisher });
+    const gasPrice = await pub.getGasPrice();
+    const movement = computeMovement(packed.rows, onchain);
 
-    const base = {
-      engineBlock: packed.engineBlock,
-      rows: packed.rows.length,
-      dropped: packed.dropped,
-      decision: decision.reason,
-      moved: decision.movedRows.slice(0, 8).map((m) => ({
-        ...m,
-        bps: Number.isFinite(m.bps) ? m.bps : "unbounded",
-      })),
-      elapsedMs: Date.now() - started,
-    };
-
-    if (!decision.post) {
-      logLine({ event: "skip", ...base });
-      return;
-    }
-
+    // 3. Estimate before deciding: the cost cap is one of the rules, so the policy
+    //    cannot be evaluated without it. Estimating as the publisher doubles as a
+    //    pre-flight that the feed would ACCEPT this run.
     const args = [packed.engineBlock, packed.rows.map(toTuple)] as const;
-
-    // 3. Estimate always; send only when explicitly told to.
-    if (!wantPost) {
-      // Estimate AS THE PUBLISHER, read from the feed itself. Estimating as nobody
-      // just reverts on the publisher check and reports a useless null; estimating as
-      // the real publisher also serves as a pre-flight that the feed would ACCEPT
-      // this run, so a row the invariants reject shows up here instead of wedging the
-      // next real post. STATERA_PUBLISHER overrides it for odd setups.
-      let account = process.env["STATERA_PUBLISHER"] as Hex | undefined;
-      if (!account) {
-        try {
-          account = (await pub.readContract({
-            address: feedAddress,
-            abi: FEED_ABI,
-            functionName: "publisher",
-          })) as Hex;
-        } catch {
-          account = undefined;
-        }
-      }
-      let gas: bigint | null = null;
-      let estimateError: string | null = null;
+    let gas: bigint | null = null;
+    let estimateError: string | null = null;
+    if (packed.rows.length > 0) {
       try {
         gas = await pub.estimateContractGas({
           address: feedAddress,
           abi: FEED_ABI,
           functionName: "post",
           args: args as any,
-          ...(account ? { account } : {}),
+          account: publisher,
         });
       } catch (e) {
-        gas = null;
-        // The revert reason is the whole value of a dry run: it names the row the
-        // feed would refuse.
         estimateError = (e instanceof Error ? e.message : String(e)).split("\n")[0] ?? "unknown";
       }
-      const gasPrice = await pub.getGasPrice();
-      const px = await okbUsd();
-      logLine({
-        event: "dry-run",
-        ...base,
-        gasEstimate: gas === null ? null : Number(gas),
-        gasPriceWei: Number(gasPrice),
-        costOkb: gas === null ? null : Number(gas * gasPrice) / 1e18,
-        costUsd: gas === null || px === null ? null : (Number(gas * gasPrice) / 1e18) * px,
-        estimatedAs: account ?? null,
-        estimateError,
-        wouldBeAccepted: gas !== null,
-        note: "no transaction sent; pass --post with STATERA_KEY to publish",
-      });
+    }
+    const estimatedCostWei = gas === null ? null : gas * gasPrice;
+
+    // 4. Decide.
+    const d = decidePolicy({
+      nowSec,
+      lastPublishedAtSec: lastPublishedAt,
+      postsToday: state.postsToday,
+      counterDay: state.counterDay,
+      balanceWei,
+      estimatedCostWei,
+      rowCount: packed.rows.length,
+      moved: movement.moved,
+      newKeys: movement.newKeys,
+      statusChanges: movement.statusChanges,
+    });
+
+    const px = await okbUsd();
+    const base = {
+      engineBlock: packed.engineBlock,
+      rows: packed.rows.length,
+      dropped: packed.dropped,
+      code: d.code,
+      decision: d.reason,
+      utcDay: utcDay(nowSec),
+      postsToday: d.postsTodayEffective,
+      dailyCap: MAX_POSTS_PER_UTC_DAY,
+      ageSeconds: d.ageSeconds,
+      balanceOkb: Number(balanceWei) / 1e18,
+      gasPriceWei: Number(gasPrice),
+      gasEstimate: gas === null ? null : Number(gas),
+      estimateError,
+      costOkb: estimatedCostWei === null ? null : Number(estimatedCostWei) / 1e18,
+      costCapOkb: Number(COST_CAP_WEI) / 1e18,
+      movedCount: movement.moved.length,
+      moved: movement.moved.slice(0, 6),
+      newKeys: movement.newKeys,
+      statusChanges: movement.statusChanges,
+      elapsedMs: Date.now() - started,
+    };
+
+    // The balance-floor alert fires once on the way down, and re-arms if the balance
+    // recovers, so a top-up followed by another slide is reported again.
+    if (d.code === "refuse-balance-floor") {
+      if (!state.balanceFloorAlerted) {
+        state = { ...state, balanceFloorAlerted: true };
+        saveState(state);
+        await alert("balance-floor", `balance ${(Number(balanceWei) / 1e18).toFixed(9)} OKB is below the floor; the feed will go stale`);
+      } else {
+        logLine({ event: "alert-suppressed", kind: "balance-floor", reason: "already reported on the way down" });
+      }
+    } else if (state.balanceFloorAlerted && balanceWei >= BALANCE_FLOOR_WEI) {
+      state = { ...state, balanceFloorAlerted: false };
+      saveState(state);
+    }
+    if (d.code === "refuse-cost-cap") {
+      await alert("gas-spike", d.reason);
+    }
+
+    if (!d.post) {
+      logLine({ event: "skip", ...base });
+      saveState(state);
       return;
     }
 
-    // 4. Send.
-    // Refuse a key path inside the repo, so a future convenience edit cannot
-    // reintroduce a secret into the working tree.
-    const repoRoot = resolve(new URL("../..", import.meta.url).pathname);
-    if (resolve(keyPath).startsWith(repoRoot + "/")) {
-      throw new Error(`refusing to read a key from inside the repo: ${keyPath}`);
+    if (!wantPost) {
+      logLine({
+        event: "dry-run",
+        ...base,
+        costUsd: estimatedCostWei === null || px === null ? null : (Number(estimatedCostWei) / 1e18) * px,
+        wouldBeAccepted: gas !== null,
+        note: "no transaction sent; pass --post with STATERA_KEY to publish",
+      });
+      saveState(state);
+      return;
     }
-    const key = readFileSync(keyPath, "utf8").trim() as Hex;
-    const account = privateKeyToAccount(key);
-    const wallet = createWalletClient({ account, chain: xlayer, transport: http(chainRpcUrl) });
 
-    const publisher = (await pub.readContract({
-      address: feedAddress,
-      abi: FEED_ABI,
-      functionName: "publisher",
-    })) as Hex;
+    // 5. Send.
+    const key = (() => {
+      const repoRoot = resolve(new URL("../..", import.meta.url).pathname);
+      if (resolve(keyPath).startsWith(repoRoot + "/")) {
+        throw new Error(`refusing to read a key from inside the repo: ${keyPath}`);
+      }
+      return readFileSync(keyPath, "utf8").trim() as Hex;
+    })();
+    const account = privateKeyToAccount(key);
     if (publisher.toLowerCase() !== account.address.toLowerCase()) {
       throw new Error(`key ${account.address} is not the feed's publisher (${publisher})`);
     }
+    const wallet = createWalletClient({ account, chain: xlayer, transport: http(chainRpcUrl) });
 
-    const hash = await wallet.writeContract({
-      address: feedAddress,
-      abi: FEED_ABI,
-      functionName: "post",
-      args: args as any,
-    });
+    let hash: Hex;
+    try {
+      hash = await wallet.writeContract({
+        address: feedAddress,
+        abi: FEED_ABI,
+        functionName: "post",
+        args: args as any,
+      });
+    } catch (e) {
+      const msg = (e instanceof Error ? e.message : String(e)).split("\n")[0] ?? "unknown";
+      logLine({ event: "post-failed", ...base, stage: "send", message: msg });
+      await alert("post-failed", `send failed: ${msg}`);
+      process.exitCode = 1;
+      return;
+    }
+
     const rc = await pub.waitForTransactionReceipt({ hash });
-    const px = await okbUsd();
+    if (rc.status !== "success") {
+      logLine({ event: "post-failed", ...base, stage: "receipt", txHash: hash, status: rc.status });
+      await alert("post-failed", `transaction ${hash} reverted`);
+      process.exitCode = 1;
+      return;
+    }
+
     const costWei = rc.gasUsed * (rc.effectiveGasPrice ?? 0n);
     const costOkb = Number(costWei) / 1e18;
+    state = { ...state, postsToday: d.postsTodayEffective + 1, lastTxHash: hash };
+    saveState(state);
 
     logLine({
       event: "posted",
       ...base,
+      postsToday: state.postsToday,
       txHash: hash,
-      status: rc.status,
       xlayerBlock: Number(rc.blockNumber),
       gasUsed: Number(rc.gasUsed),
       effectiveGasPriceWei: Number(rc.effectiveGasPrice ?? 0n),
       costOkb,
       okbUsd: px,
       costUsd: px === null ? null : costOkb * px,
+      balanceAfterOkb: Number(await pub.getBalance({ address: publisher })) / 1e18,
     });
   } catch (e) {
-    logLine({ event: "error", message: e instanceof Error ? e.message : String(e) });
+    const msg = e instanceof Error ? e.message : String(e);
+    logLine({ event: "error", message: msg });
+    await alert("post-failed", `keeper run failed: ${msg}`);
     process.exitCode = 1;
   } finally {
     release();

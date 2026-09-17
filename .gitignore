@@ -8,3 +8,4 @@ cache/
 *.key
 # Keeper run log
 keeper.log
+keeper-state.json

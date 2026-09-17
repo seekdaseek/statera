@@ -6,14 +6,23 @@ deployer.
 
 ## Addresses
 
-| contract | address |
-|---|---|
-| StateraFeed | [`0x879d9a5d1Fa688DDf94b13361490746Faf8b784C`](https://www.oklink.com/x-layer/address/0x879d9a5d1fa688ddf94b13361490746faf8b784c) |
-| CollateralGate | [`0x5Ab5C851246c7056B90245af6639e9446BF1Ad79`](https://www.oklink.com/x-layer/address/0x5ab5c851246c7056b90245af6639e9446bf1ad79) |
-| publisher (EOA) | [`0x5B65b1e067270c46945e3bE5c0588FDb4dc7c018`](https://www.oklink.com/x-layer/address/0x5b65b1e067270c46945e3be5c0588fdb4dc7c018) |
+| contract | address | status |
+|---|---|---|
+| StateraFeed | [`0x879d9a5d1Fa688DDf94b13361490746Faf8b784C`](https://www.oklink.com/x-layer/address/0x879d9a5d1fa688ddf94b13361490746faf8b784c) | live, the only feed |
+| CollateralGate (maxAge 7200) | [`0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA`](https://www.oklink.com/x-layer/address/0x12c23e1cce2ee3246a3161852d2ca7d6cfe4b9da) | **current gate** |
+| CollateralGate (maxAge 1800) | [`0x5Ab5C851246c7056B90245af6639e9446BF1Ad79`](https://www.oklink.com/x-layer/address/0x5ab5c851246c7056b90245af6639e9446bf1ad79) | superseded, still live |
+| publisher (EOA) | [`0x5B65b1e067270c46945e3bE5c0588FDb4dc7c018`](https://www.oklink.com/x-layer/address/0x5b65b1e067270c46945e3be5c0588fdb4dc7c018) | |
 
-Constructor arguments: `StateraFeed(publisher)`, `CollateralGate(feed, 1800)`.
-The gate's 1800-second max age matches the keeper's heartbeat.
+Constructor arguments: `StateraFeed(publisher)`, `CollateralGate(feed, maxAgeSeconds)`.
+
+**Why there are two gates.** `maxAgeSeconds` is immutable, deliberately: a lender's
+staleness tolerance should not be editable by whoever holds a key. Changing it means
+deploying a new gate. The original gate demanded a post every 1800 seconds, which the
+funded balance cannot sustain to Sep 30 — the keeper would have had to post 48 times a
+day and would have run dry. The 7200-second gate matches a budget of at most 18 posts
+a day. Both read the same feed and the same rows; they differ only in how old a row
+they will lend against, so the superseded one is left deployed rather than orphaned:
+anything already pointed at it keeps working, it just refuses sooner.
 
 ## Transactions
 
@@ -22,8 +31,9 @@ The gate's 1800-second max age matches the keeper's heartbeat.
 | deploy StateraFeed | [`0x0c337035…f401151`](https://www.oklink.com/x-layer/tx/0x0c33703581590713b44a33e9ba594ae2fb8fb5849ccc226e3a18beefcf401151) | 70,894,352 | 1,736,186 | 0.000034724 OKB |
 | deploy CollateralGate | [`0xdcf79328…1b08c48b`](https://www.oklink.com/x-layer/tx/0xdcf79328b3f68cd369e91418df697d2199e6cdbbdb65994aa1aa5bce1b08c48b) | 70,894,356 | 1,217,171 | 0.000024343 OKB |
 | first post, 18 rows | [`0x0aea9f23…f15cdd09`](https://www.oklink.com/x-layer/tx/0x0aea9f2368ab276af3aaa3b3617fa135bf1b9c47993e7a80b1a879f0f15cdd09) | 70,894,753 | 1,766,304 | 0.000035326 OKB |
+| deploy CollateralGate 7200 | [`0xf76d70dc…994b84a2`](https://www.oklink.com/x-layer/tx/0xf76d70dc12529ad6c3d1255b697a8d7cfc3795160326941c3970dc9e994b84a2) | 70,898,362 | 1,217,171 | 0.000024343 OKB |
 
-All three at 0.020000001 gwei. Total **0.000094393 OKB ($0.0106)** at OKB $112.
+All at 0.020000001 gwei. Total **0.000118736 OKB ($0.0133)** at OKB $112.
 Every gas figure matched the fork forecast exactly.
 
 The first post recorded engine block **70,894,700** and emitted **19 logs: 18
@@ -41,7 +51,8 @@ forge verify-contract <address> contracts/<C>.sol:<C> --chain 196 --verifier sou
 | contract | Sourcify |
 |---|---|
 | StateraFeed | [exact_match](https://repo.sourcify.dev/196/0x879d9a5d1Fa688DDf94b13361490746Faf8b784C) · verified 2026-09-17T16:45:23Z |
-| CollateralGate | [exact_match](https://repo.sourcify.dev/196/0x5Ab5C851246c7056B90245af6639e9446BF1Ad79) · verified 2026-09-17T16:45:24Z |
+| CollateralGate 7200 (current) | [exact_match](https://repo.sourcify.dev/196/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA) · verified 2026-09-17T17:50:51Z |
+| CollateralGate 1800 (superseded) | [exact_match](https://repo.sourcify.dev/196/0x5Ab5C851246c7056B90245af6639e9446BF1Ad79) · verified 2026-09-17T16:45:24Z |
 
 **OKLink — UNVERIFIED, and it needs an account.** Its `verify-source-code` endpoint
 accepted a keyless submission for both contracts (`{"code":"0"}` plus a job GUID:

@@ -14,7 +14,11 @@ import {
   packReport, toUsd6, expectedGapBps, moveBps, toTuple,
   FORM_RAW, FORM_WRAPPED, STATUS_MEASURED, STATUS_ABSENT,
 } from "../src/pack.js";
-import { decide, acquireLock, MOVE_BPS, HEARTBEAT_SECONDS } from "../src/keeper.js";
+import { acquireLock } from "../src/keeper.js";
+import {
+  decidePolicy, computeMovement, MOVE_BPS, HEARTBEAT_SECONDS, MOVE_COOLDOWN_SECONDS,
+  type OnchainRow,
+} from "../src/policy.js";
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -198,7 +202,7 @@ const NOW = 1_750_000_000;
 const key = (form: number, tier: number) => `${NVDA.raw.toLowerCase()}/${form}/${tier}`;
 
 function onchainFrom(rows: ReturnType<typeof packReport>["rows"]) {
-  const m = new Map<string, { markUsd: bigint; realisableUsd: bigint; fillableUsd: bigint; status: number }>();
+  const m = new Map<string, OnchainRow>();
   for (const r of rows) {
     m.set(key(r.form, r.sizeTierUsd), {
       markUsd: r.markUsd,
@@ -210,17 +214,48 @@ function onchainFrom(rows: ReturnType<typeof packReport>["rows"]) {
   return m;
 }
 
+// The old decide() folded movement and cadence together. They are now two pieces:
+// computeMovement says WHAT changed, decidePolicy says whether that is worth OKB.
+// These tests drive both, so they still exercise the path the keeper runs.
+//
+// AFFORDABLE is what the solvency guards look like when they are not the subject of
+// the test: a balance well over the floor and a cost well under the cap. Without
+// them every case below would refuse for the wrong reason.
+const AFFORDABLE = {
+  postsToday: 0,
+  counterDay: "2025-06-15",
+  balanceWei: 2_800_000_000_000_000n, // 0.0028 OKB
+  estimatedCostWei: 8_729_000_000_000n, // one steady-state post
+};
+
+function decideWith(
+  rows: ReturnType<typeof packReport>["rows"],
+  chain: Map<string, OnchainRow>,
+  lastPublishedAtSec: number,
+  nowSec = NOW,
+) {
+  const m = computeMovement(rows, chain);
+  const d = decidePolicy({ nowSec, lastPublishedAtSec, rowCount: rows.length, ...AFFORDABLE, ...m });
+  return { ...d, movement: m };
+}
+
+// Past the movement cooldown but still inside the heartbeat, so a post here is
+// attributable to movement alone and a refusal to the cadence rules alone.
+const QUIET_AGE = MOVE_COOLDOWN_SECONDS + 600;
+
 test("posts when a key has never been published", () => {
   const p = packReport(report([row({})]));
-  const d = decide(p.rows, new Map(), 0, NOW);
+  const d = decideWith(p.rows, new Map(), 0);
   assert.equal(d.post, true);
-  assert.match(d.reason, /never been published/);
+  assert.equal(d.code, "post-first");
+  assert.match(d.reason, /ever been posted to this feed/);
 });
 
 test("skips when nothing moved and the heartbeat is not due", () => {
   const p = packReport(report([row({})]));
-  const d = decide(p.rows, onchainFrom(p.rows), NOW - 60, NOW);
+  const d = decideWith(p.rows, onchainFrom(p.rows), NOW - 60);
   assert.equal(d.post, false);
+  assert.equal(d.code, "refuse-quiet");
   assert.match(d.reason, /nothing moved/);
 });
 
@@ -229,15 +264,16 @@ test("posts when a value moved more than the threshold", () => {
   const chain = onchainFrom(p.rows);
   const k = key(FORM_WRAPPED, 1000);
   const prev = chain.get(k)!;
-  // Move the onchain realisable value 20 bps away from the fresh one. Note the
-  // asymmetry: moveBps is measured against the OLD value, so a +6 bps nudge reads
-  // back as 5 bps and would not trigger. 20 bps is unambiguous either way.
-  chain.set(k, { ...prev, realisableUsd: (prev.realisableUsd * 10_020n) / 10_000n });
-  const d = decide(p.rows, chain, NOW - 60, NOW);
+  // Move the onchain realisable value 200 bps away from the fresh one. Note the
+  // asymmetry: moveBps is measured against the OLD value, so a move just over the
+  // threshold can read back just under it. 200 bps is unambiguous either way.
+  chain.set(k, { ...prev, realisableUsd: (prev.realisableUsd * 10_200n) / 10_000n });
+  const d = decideWith(p.rows, chain, NOW - QUIET_AGE);
   assert.equal(d.post, true);
-  assert.match(d.reason, /moved more than 5 bps/);
-  assert.equal(d.movedRows[0]!.field, "realisableUsd");
-  assert.ok(d.movedRows[0]!.bps > MOVE_BPS, `reported ${d.movedRows[0]!.bps} bps`);
+  assert.equal(d.code, "post-movement");
+  assert.match(d.reason, /moved more than 100 bps/);
+  assert.equal(d.movement.moved[0]!.field, "realisableUsd");
+  assert.ok(d.movement.moved[0]!.bps > MOVE_BPS, `reported ${d.movement.moved[0]!.bps} bps`);
 });
 
 test("a move of exactly the threshold is not enough to pay for a post", () => {
@@ -248,8 +284,10 @@ test("a move of exactly the threshold is not enough to pay for a post", () => {
   const k = key(FORM_WRAPPED, 1000);
   const prev = chain.get(k)!;
   chain.set(k, { ...prev, realisableUsd: (prev.realisableUsd * (10_000n + BigInt(MOVE_BPS))) / 10_000n });
-  const d = decide(p.rows, chain, NOW - 60, NOW);
+  const d = decideWith(p.rows, chain, NOW - QUIET_AGE);
+  assert.equal(d.movement.moved.length, 0);
   assert.equal(d.post, false);
+  assert.equal(d.code, "refuse-quiet");
 });
 
 test("posts when a row changed status even if the numbers barely moved", () => {
@@ -257,21 +295,24 @@ test("posts when a row changed status even if the numbers barely moved", () => {
   const chain = onchainFrom(p.rows);
   const k = key(FORM_WRAPPED, 1000);
   chain.set(k, { ...chain.get(k)!, status: STATUS_ABSENT });
-  const d = decide(p.rows, chain, NOW - 60, NOW);
+  const d = decideWith(p.rows, chain, NOW - QUIET_AGE);
   assert.equal(d.post, true);
-  assert.match(d.reason, /changed status/);
+  assert.equal(d.code, "post-movement");
+  assert.equal(d.movement.statusChanges, 1);
+  assert.match(d.reason, /status change/);
 });
 
 test("posts on the heartbeat so silence is distinguishable from a dead keeper", () => {
   const p = packReport(report([row({})]));
-  const d = decide(p.rows, onchainFrom(p.rows), NOW - HEARTBEAT_SECONDS, NOW);
+  const d = decideWith(p.rows, onchainFrom(p.rows), NOW - HEARTBEAT_SECONDS);
   assert.equal(d.post, true);
+  assert.equal(d.code, "post-heartbeat");
   assert.match(d.reason, /heartbeat/);
 });
 
 test("one second before the heartbeat it still holds", () => {
   const p = packReport(report([row({})]));
-  const d = decide(p.rows, onchainFrom(p.rows), NOW - HEARTBEAT_SECONDS + 1, NOW);
+  const d = decideWith(p.rows, onchainFrom(p.rows), NOW - HEARTBEAT_SECONDS + 1);
   assert.equal(d.post, false);
 });
 
@@ -280,9 +321,10 @@ test("an onchain row that reads back unmeasured counts as never published", () =
   const chain = onchainFrom(p.rows);
   const k = key(FORM_WRAPPED, 1000);
   chain.set(k, { markUsd: 0n, realisableUsd: 0n, fillableUsd: 0n, status: 0 });
-  const d = decide(p.rows, chain, NOW - 60, NOW);
+  const d = decideWith(p.rows, chain, NOW - QUIET_AGE);
+  assert.equal(d.movement.newKeys, 1);
   assert.equal(d.post, true);
-  assert.match(d.reason, /never been published/);
+  assert.match(d.reason, /new key/);
 });
 
 /* --------------------------------------------------------------------- lock */
