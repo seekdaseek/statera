@@ -523,4 +523,27 @@ contract CollateralGateTest is Test {
             assertFalse(ok, "try refused it, so strict must revert");
         }
     }
+
+    /// @notice The contradiction check must not depend on the order the tiers were
+    ///         posted in, since the feed keeps them unsorted.
+    function test_refusesASmallerAbsentTierWhicheverOrderItArrivedIn() public {
+        RowInput[] memory rows = new RowInput[](2);
+        // Measured larger tier FIRST, absent smaller one second.
+        rows[0] = measured(NVDAx, Form.Wrapped, 10000, NVDA_MARK, NVDA_R_10K);
+        rows[1] = absent(NVDAx, Form.Wrapped, 1000, NVDA_MARK, 500_000_000, 500_000_000);
+        vm.prank(publisher);
+        feed.post(ENGINE_BLOCK, rows);
+
+        assertEq(feed.tiers(NVDAx, Form.Wrapped)[0], 10000, "arrival order really is unsorted");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CollateralGate.SmallerTierNotSellable.selector,
+                NVDAx,
+                Form.Wrapped,
+                uint32(1000),
+                uint128(500_000_000)
+            )
+        );
+        gate.borrowLimitUsd(NVDAx, Form.Wrapped, 5_000 * 1e6, LTV);
+    }
 }
