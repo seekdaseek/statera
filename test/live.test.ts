@@ -52,8 +52,34 @@ function decodeSwap(log: any): SwapEvent {
   };
 }
 
+/**
+ * How far back to look for a trade to replay.
+ *
+ * NARROW is the everyday scan, and it is exactly what this test has always used.
+ * WIDE is a second attempt, and it exists because these are tokenized US stocks:
+ * when the underlying market is closed there is no arbitrage to do, and the thinnest
+ * pool here can go hours without a single swap. A test that asserts a market traded
+ * recently then fails on market conditions rather than on the code. Observed: the
+ * last trade on USDG/wSPYx was 6,562 blocks back while the other two pools had both
+ * traded 300 blocks back.
+ *
+ * A pool that traded inside NARROW never reaches the wide scan, so nothing about its
+ * assertions changes. The wide scan is only ever reached where the old code failed
+ * outright, which is why it is free to be slower.
+ */
+const NARROW_WINDOWS = 40; // 4,000 blocks, ~67 min at 1s blocks
+const WIDE_WINDOWS = 300; // 30,000 blocks, ~8.3 h
+
+/**
+ * Test-only: force the scan to come back empty for a pool, so the skip path can
+ * actually be exercised. You cannot ask a market to go quiet on demand, and a branch
+ * that cannot be reached on demand is a branch nobody has ever run. Set it to "all"
+ * or to a single pool label.
+ */
+const FORCE_NO_SWAPS = process.env["STATERA_LIVE_NO_SWAPS"] ?? "";
+
 /** Most recent swaps on a pool, newest first. The RPC caps ranges at 100 blocks. */
-async function recentSwaps(rpc: Rpc, address: string, head: number, windows = 40): Promise<SwapEvent[]> {
+async function recentSwaps(rpc: Rpc, address: string, head: number, windows = NARROW_WINDOWS): Promise<SwapEvent[]> {
   const out: SwapEvent[] = [];
   for (let i = 0; i < windows && out.length < 12; i++) {
     const to = head - i * 100;
@@ -70,11 +96,34 @@ async function recentSwaps(rpc: Rpc, address: string, head: number, windows = 40
 }
 
 for (const p of POOLS) {
-  test(`replay: engine reproduces real executed swaps on ${p.label}`, async () => {
+  test(`replay: engine reproduces real executed swaps on ${p.label}`, async (t) => {
     const rpc = new Rpc();
     const head = await rpc.blockNumber();
-    const swaps = await recentSwaps(rpc, p.address, head);
-    assert.ok(swaps.length > 0, `no Swap events found on ${p.label} in the scanned window`);
+    const forced = FORCE_NO_SWAPS === "all" || FORCE_NO_SWAPS === p.label;
+    const scan = async (windows: number): Promise<SwapEvent[]> =>
+      forced ? [] : recentSwaps(rpc, p.address, head, windows);
+
+    // Narrow scan, then widen once. Skipping is reserved for a pool that recorded
+    // nothing in either: no executed trade means no oracle, and asserting against an
+    // oracle that does not exist is how a test starts reporting the weather.
+    let swaps = await scan(NARROW_WINDOWS);
+    let scannedWindows = NARROW_WINDOWS;
+    if (swaps.length === 0) {
+      swaps = await scan(WIDE_WINDOWS);
+      scannedWindows = WIDE_WINDOWS;
+    }
+    if (swaps.length === 0) {
+      const blocks = scannedWindows * 100;
+      // Skipped, not passed. node:test counts a skip separately from a pass, so this
+      // cannot read as a green assertion in the summary.
+      t.skip(
+        `${p.label} recorded no Swap event in the last ${blocks} blocks ` +
+          `(~${(blocks / 3600).toFixed(1)} h at 1s blocks)` +
+          `${forced ? ", forced empty by STATERA_LIVE_NO_SWAPS" : ""}: ` +
+          `no executed trade to replay, so the engine is neither confirmed nor contradicted here`,
+      );
+      return; // t.skip() does not stop execution on its own.
+    }
 
     let validated = 0;
     const misses: string[] = [];
