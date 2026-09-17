@@ -510,7 +510,10 @@ contract StateraFeedTest is Test {
 
     function testFuzz_measuredGapAlwaysAgreesWithValues(uint32 tier, uint128 realisable) public {
         tier = uint32(bound(tier, 1, 10_000_000));
-        realisable = uint128(bound(realisable, 1, uint128(type(uint96).max)));
+        // The feed now bounds proceeds at MAX_REALISABLE_MULTIPLE x face, so fuzzing
+        // above that tests the bound, not the gap. The bound has its own tests below.
+        uint256 face = uint256(tier) * 1e6;
+        realisable = uint128(bound(realisable, 1, face * 2));
         int256 gap = gapOf(tier, realisable);
         // Cross-check the local formula against the contract's own.
         assertEq(gap, feed.expectedGapBps(tier, realisable));
@@ -539,5 +542,93 @@ contract StateraFeedTest is Test {
         vm.prank(caller);
         vm.expectRevert(abi.encodeWithSelector(StateraFeed.NotPublisher.selector, caller));
         feed.post(ENGINE_BLOCK, rows);
+    }
+
+    /* ------------------------------------------- bounds added after review */
+
+    /// @notice A filled tier has no unfilled remainder, so the field must be empty.
+    function test_measured_rejectsAFillableAmount() public {
+        RowInput memory r = measured(NVDAx, Form.Wrapped, 1000, 220_018_700, 997_600_000);
+        r.fillableUsd = 42_000_000;
+        vm.prank(publisher);
+        vm.expectRevert(abi.encodeWithSelector(StateraFeed.MeasuredRowHasFillable.selector, 0));
+        feed.post(ENGINE_BLOCK, one(r));
+    }
+
+    /**
+     * @notice The bound that matters. Before it existed, a Measured row claiming ten
+     * times face value passed every check — the gap agreed, because the gap was
+     * computed FROM that value — and CollateralGate turned a $1,000 pledge into a
+     * $10,000 borrow limit. The gap check alone cannot catch this: it only proves the
+     * gap and the value are consistent with each other, not that either is sane.
+     */
+    function test_measured_rejectsProceedsFarAboveFace() public {
+        uint128 absurd = 10_000_000_000; // ten times the $1,000 tier
+        RowInput memory r = measured(NVDAx, Form.Wrapped, 1000, 220_018_700, absurd);
+        vm.prank(publisher);
+        vm.expectRevert(
+            abi.encodeWithSelector(StateraFeed.RealisableAboveBound.selector, 0, absurd, uint256(2_000_000_000))
+        );
+        feed.post(ENGINE_BLOCK, one(r));
+    }
+
+    function test_measured_allowsProceedsAtTheBound() public {
+        // Exactly twice face is permitted; the bound is a sanity limit, not a claim
+        // that the pools can never pay above the mark.
+        uint128 atBound = 2_000_000_000;
+        postOne(measured(NVDAx, Form.Wrapped, 1000, 220_018_700, atBound));
+        assertEq(feed.latestFor(NVDAx, Form.Wrapped, 1000).realisableUsd, atBound);
+    }
+
+    function test_measured_allowsASmallPositiveBasis() public {
+        // The real case the bound must not break: the pools paying a few bps over.
+        uint128 slightlyOver = 1_000_600_000; // +6 bps
+        postOne(measured(NVDAx, Form.Wrapped, 1000, 220_018_700, slightlyOver));
+        assertEq(feed.latestFor(NVDAx, Form.Wrapped, 1000).realisableUsd, slightlyOver);
+    }
+
+    /// @notice "Absent" asserts the tier could not be filled, so the amount that did
+    ///         fill has to be strictly less than the tier's face value.
+    function test_absent_rejectsFillableAtOrAboveFace() public {
+        RowInput memory r = absent(NVDAx, Form.Wrapped, 1000, 220_018_700, 900_000_000, 1_000_000_000);
+        vm.prank(publisher);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StateraFeed.AbsentFillableNotBelowTier.selector, 0, uint128(1_000_000_000), uint256(1_000_000_000)
+            )
+        );
+        feed.post(ENGINE_BLOCK, one(r));
+
+        r.fillableUsd = 999_999_999;
+        postOne(r); // one unit below face is fine
+        assertEq(feed.latestFor(NVDAx, Form.Wrapped, 1000).fillableUsd, 999_999_999);
+    }
+
+    /// @notice And therefore maxFillableUsd can never exceed the largest tier's face.
+    function test_maxFillable_cannotExceedTheLargestTier() public {
+        postOne(absent(NVDAx, Form.Wrapped, 500000, 220_018_700, 1_000_000, 499_999_000_000));
+        assertLt(feed.maxFillableUsd(NVDAx, Form.Wrapped), uint256(500000) * 1e6);
+    }
+
+    /// @notice An out-of-range enum cannot be smuggled in through raw calldata:
+    ///         the ABI decoder rejects it before any of our checks run.
+    function test_post_rejectsAStatusOutsideTheEnum() public {
+        bytes memory payload = abi.encodeWithSelector(
+            StateraFeed.post.selector,
+            uint40(ENGINE_BLOCK),
+            uint256(0x40), // offset to the array
+            uint256(1), // length
+            uint256(uint160(NVDAx)),
+            uint256(1), // form = Wrapped
+            uint256(1000),
+            uint256(220_018_700),
+            uint256(997_600_000),
+            uint256(0),
+            int256(-24),
+            uint256(3) // status = 3, outside Status
+        );
+        vm.prank(publisher);
+        (bool ok,) = address(feed).call(payload);
+        assertFalse(ok, "a status outside the enum must not decode");
     }
 }

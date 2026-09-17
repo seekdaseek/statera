@@ -53,6 +53,9 @@ contract CollateralGate {
     error CollateralNotSellableAtSize(address token, Form form, uint32 tierUsd, uint128 fillableUsd);
     /// @notice The row is too old to be evidence about present depth.
     error RowStale(address token, Form form, uint32 tierUsd, uint48 publishedAt, uint256 ageSeconds, uint256 maxAge);
+    /// @notice A smaller tier says the pools cannot fill it, which contradicts the
+    ///         larger tier this pledge would otherwise be priced against.
+    error SmallerTierNotSellable(address token, Form form, uint32 absentTierUsd, uint128 fillableUsd);
     error ZeroAmount();
     error InvalidLtv(uint16 ltvBps);
 
@@ -65,7 +68,11 @@ contract CollateralGate {
         NoTierCoversAmount,
         Unmeasured,
         NotSellable,
-        Stale
+        Stale,
+        /// @dev amountUsd of zero, or an ltvBps outside (0, 10000].
+        BadParameters,
+        /// @dev A smaller tier is Absent, so the larger tier's number is not credible.
+        SmallerTierNotSellable
     }
 
     constructor(IStateraFeed feed_, uint256 maxAgeSeconds_) {
@@ -95,7 +102,7 @@ contract CollateralGate {
         // One division, not two: dividing out the tier first and then applying the
         // LTV truncates twice and loses precision for no reason.
         uint256 face = uint256(tier) * USD_SCALE;
-        return (amountUsd * uint256(row.realisableUsd) * uint256(ltvBps)) / (face * BPS);
+        return (amountUsd * _cappedRealisable(row, face) * uint256(ltvBps)) / (face * BPS);
     }
 
     /**
@@ -108,7 +115,20 @@ contract CollateralGate {
         if (amountUsd == 0) revert ZeroAmount();
         (Row memory row, uint32 tier) = _validated(token, form, amountUsd);
         uint256 face = uint256(tier) * USD_SCALE;
-        return (amountUsd * uint256(row.realisableUsd)) / face;
+        return (amountUsd * _cappedRealisable(row, face)) / face;
+    }
+
+    /**
+     * @dev Collateral is never valued above its own face value, whatever the feed
+     *      says. The feed already bounds a Measured row's proceeds, but a lender must
+     *      not depend on its data source being sane: a single mis-scaled row would
+     *      otherwise mint credit out of nothing. Capping here costs only the few
+     *      basis points of upside when the pools genuinely pay above the mark, which
+     *      is the right side to err on.
+     */
+    function _cappedRealisable(Row memory row, uint256 face) private pure returns (uint256) {
+        uint256 r = uint256(row.realisableUsd);
+        return r > face ? face : r;
     }
 
     /**
@@ -117,9 +137,15 @@ contract CollateralGate {
      *      lending decision uses realisableValueUsd directly.
      */
     function haircutBps(address token, Form form, uint256 amountUsd) external view returns (uint256) {
-        uint256 value = realisableValueUsd(token, form, amountUsd);
-        if (value >= amountUsd) return 0;
-        return ((amountUsd - value) * BPS) / amountUsd;
+        if (amountUsd == 0) revert ZeroAmount();
+        (Row memory row, uint32 tier) = _validated(token, form, amountUsd);
+        // Derived from the TIER, not from the pledged amount. Scaling a small pledge
+        // down first truncates its value to zero and then reports a 100% haircut on a
+        // perfectly healthy series, which is worse than useless in a UI.
+        uint256 face = uint256(tier) * USD_SCALE;
+        uint256 r = _cappedRealisable(row, face);
+        if (r >= face) return 0;
+        return ((face - r) * BPS) / face;
     }
 
     /**
@@ -134,7 +160,7 @@ contract CollateralGate {
         view
         returns (Refusal refusal, uint256 limitUsd, uint32 tierUsd, uint128 fillableUsd)
     {
-        if (amountUsd == 0 || ltvBps == 0 || ltvBps > BPS) return (Refusal.NoTierCoversAmount, 0, 0, 0);
+        if (amountUsd == 0 || ltvBps == 0 || ltvBps > BPS) return (Refusal.BadParameters, 0, 0, 0);
 
         uint32[] memory ts = feed.tiers(token, form);
         if (ts.length == 0) return (Refusal.UnknownSeries, 0, 0, 0);
@@ -147,9 +173,18 @@ contract CollateralGate {
         if (row.status == uint8(Status.Absent)) return (Refusal.NotSellable, 0, tier, row.fillableUsd);
         if (block.timestamp - uint256(row.publishedAt) > maxAgeSeconds) return (Refusal.Stale, 0, tier, 0);
 
+        // Mirror the strict form's contradiction check.
+        for (uint256 i = 0; i < ts.length; ++i) {
+            if (ts[i] >= tier) continue;
+            Row memory smaller = feed.latestFor(token, form, ts[i]);
+            if (smaller.status == uint8(Status.Absent)) {
+                return (Refusal.SmallerTierNotSellable, 0, ts[i], smaller.fillableUsd);
+            }
+        }
+
         uint256 face = uint256(tier) * USD_SCALE;
-        uint256 value = (amountUsd * uint256(row.realisableUsd)) / face;
-        return (Refusal.None, (value * uint256(ltvBps)) / BPS, tier, 0);
+        uint256 value = (amountUsd * _cappedRealisable(row, face) * uint256(ltvBps)) / (face * BPS);
+        return (Refusal.None, value, tier, 0);
     }
 
     /* ------------------------------------------------------------- internals */
@@ -163,6 +198,7 @@ contract CollateralGate {
         returns (Row memory row, uint32 tier)
     {
         tier = _coveringTier(token, form, amountUsd);
+        _requireNoSmallerAbsentTier(token, form, tier);
         row = feed.latestFor(token, form, tier);
 
         if (row.status == uint8(Status.Unmeasured)) revert RowUnmeasured(token, form, tier);
@@ -180,6 +216,23 @@ contract CollateralGate {
     /// @notice The tier that would be consulted for this amount.
     function coveringTierUsd(address token, Form form, uint256 amountUsd) external view returns (uint32) {
         return _coveringTier(token, form, amountUsd);
+    }
+
+    /**
+     * @dev If the pools cannot fill $10,000 they certainly cannot fill $100,000, so a
+     *      Measured larger tier sitting above an Absent smaller one is contradictory
+     *      data. Rather than pick the answer that happens to favour the borrower, the
+     *      gate refuses and names the tier that disagrees.
+     */
+    function _requireNoSmallerAbsentTier(address token, Form form, uint32 tier) private view {
+        uint32[] memory ts = feed.tiers(token, form);
+        for (uint256 i = 0; i < ts.length; ++i) {
+            if (ts[i] >= tier) continue;
+            Row memory smaller = feed.latestFor(token, form, ts[i]);
+            if (smaller.status == uint8(Status.Absent)) {
+                revert SmallerTierNotSellable(token, form, ts[i], smaller.fillableUsd);
+            }
+        }
     }
 
     function _coveringTier(address token, Form form, uint256 amountUsd) private view returns (uint32) {

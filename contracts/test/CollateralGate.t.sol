@@ -374,14 +374,153 @@ contract CollateralGateTest is Test {
         assertLe(limit, (amountUsd * LTV) / 10_000);
     }
 
-    function testFuzz_valuationIsMonotonicInAmount(uint256 a, uint256 b) public {
+    /**
+     * @notice Within one tier, value rises with the amount pledged.
+     *
+     * ACROSS tiers it does not, and that is deliberate: crossing into a larger tier
+     * reprices the whole pledge at that tier's worse rate, so total value can dip by
+     * a hair at the boundary (see the test below). The earlier version of this test
+     * asserted global monotonicity, which is simply not a property of tiered pricing
+     * — it passed only until the fuzzer found a boundary pair.
+     */
+    function testFuzz_valuationIsMonotonicWithinATier(uint256 a, uint256 b) public {
         postNvdaSeries();
-        a = bound(a, 1, 100_000 * 1e6);
-        b = bound(b, 1, 100_000 * 1e6);
+        a = bound(a, 1, 1_000 * 1e6);
+        b = bound(b, 1, 1_000 * 1e6);
         if (a > b) (a, b) = (b, a);
-        // Larger pledges can only be valued at the same or a worse rate, never better.
-        uint256 va = gate.realisableValueUsd(NVDAx, Form.Wrapped, a);
-        uint256 vb = gate.realisableValueUsd(NVDAx, Form.Wrapped, b);
-        assertLe(va, vb + 1);
+        assertEq(gate.coveringTierUsd(NVDAx, Form.Wrapped, a), gate.coveringTierUsd(NVDAx, Form.Wrapped, b));
+        assertLe(
+            gate.realisableValueUsd(NVDAx, Form.Wrapped, a),
+            gate.realisableValueUsd(NVDAx, Form.Wrapped, b)
+        );
+    }
+
+    /// @notice The boundary discontinuity, pinned so nobody "fixes" it into an
+    ///         overvaluation. One unit over the $1,000 tier is priced off the
+    ///         $10,000 tier and is therefore worth slightly less in total.
+    function test_crossingATierBoundaryCanLowerTotalValue() public {
+        postNvdaSeries();
+        uint256 justUnder = 1_000 * 1e6;
+        uint256 justOver = justUnder + 1;
+        uint256 vUnder = gate.realisableValueUsd(NVDAx, Form.Wrapped, justUnder);
+        uint256 vOver = gate.realisableValueUsd(NVDAx, Form.Wrapped, justOver);
+        assertEq(gate.coveringTierUsd(NVDAx, Form.Wrapped, justUnder), 1000);
+        assertEq(gate.coveringTierUsd(NVDAx, Form.Wrapped, justOver), 10000);
+        assertLt(vOver, vUnder, "the larger pledge is priced off a worse tier");
+        // Both remain below face, which is the invariant that actually matters.
+        assertLt(vUnder, justUnder);
+        assertLt(vOver, justOver);
+    }
+
+    /* ------------------------------------------- hardening added after review */
+
+    /**
+     * @notice A lender must not depend on its feed being sane. The feed now bounds a
+     * Measured row's proceeds, but the gate caps the valuation at face independently:
+     * before both existed, one mis-scaled row turned a $1,000 pledge into a $10,000
+     * borrow limit at 100% LTV.
+     */
+    function test_neverValuesCollateralAboveItsFaceValue() public {
+        // Twice face is the most the feed will accept; the gate must still cap at face.
+        uint128 twiceFace = 2_000_000_000;
+        postOne(measured(NVDAx, Form.Wrapped, 1000, NVDA_MARK, twiceFace));
+
+        uint256 pledged = 1_000 * 1e6;
+        assertEq(gate.realisableValueUsd(NVDAx, Form.Wrapped, pledged), pledged, "capped at face");
+        assertEq(gate.borrowLimitUsd(NVDAx, Form.Wrapped, pledged, 10_000), pledged);
+        assertEq(gate.haircutBps(NVDAx, Form.Wrapped, pledged), 0);
+    }
+
+    function testFuzz_valueNeverExceedsFace(uint128 realisable, uint256 amountUsd) public {
+        uint256 face = 1_000 * 1e6;
+        realisable = uint128(bound(realisable, 1, face * 2));
+        amountUsd = bound(amountUsd, 1, face);
+        postOne(measured(NVDAx, Form.Wrapped, 1000, NVDA_MARK, realisable));
+        assertLe(gate.realisableValueUsd(NVDAx, Form.Wrapped, amountUsd), amountUsd);
+    }
+
+    /// @notice The haircut is a property of the tier, not of how little was pledged.
+    ///         Scaling a dust pledge down first truncated its value to zero and then
+    ///         reported a 100% haircut on a perfectly healthy series.
+    function test_haircutOnADustPledgeReflectsTheTierNotTheDust() public {
+        postNvdaSeries();
+        // A 1-unit pledge is covered by the SMALLEST tier, so it inherits that
+        // tier's haircut (24 bps), not a larger tier's.
+        assertEq(gate.haircutBps(NVDAx, Form.Wrapped, 1), 24, "the covering tier's own haircut");
+        assertEq(gate.haircutBps(NVDAx, Form.Wrapped, 1_000 * 1e6), 24);
+        assertEq(gate.haircutBps(NVDAx, Form.Wrapped, 100_000 * 1e6), 207);
+    }
+
+    /**
+     * @notice If the pools cannot fill $10,000 they cannot fill $100,000 either, so a
+     * Measured larger tier above an Absent smaller one is contradictory. The gate
+     * refuses instead of taking the reading that favours the borrower.
+     */
+    function test_refuses_whenASmallerTierIsNotSellable() public {
+        RowInput[] memory rows = new RowInput[](2);
+        rows[0] = absent(NVDAx, Form.Wrapped, 10000, NVDA_MARK, 1_000_000, 5_000_000_000);
+        rows[1] = measured(NVDAx, Form.Wrapped, 100000, NVDA_MARK, NVDA_R_100K);
+        vm.prank(publisher);
+        feed.post(ENGINE_BLOCK, rows);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CollateralGate.SmallerTierNotSellable.selector,
+                NVDAx,
+                Form.Wrapped,
+                uint32(10000),
+                uint128(5_000_000_000)
+            )
+        );
+        gate.borrowLimitUsd(NVDAx, Form.Wrapped, 40_000 * 1e6, LTV);
+
+        (CollateralGate.Refusal refusal,, uint32 tier, uint128 fillable) =
+            gate.tryBorrowLimitUsd(NVDAx, Form.Wrapped, 40_000 * 1e6, LTV);
+        assertEq(uint8(refusal), uint8(CollateralGate.Refusal.SmallerTierNotSellable));
+        assertEq(tier, 10000);
+        assertEq(fillable, 5_000_000_000);
+    }
+
+    /// @notice A healthy series is unaffected by that check.
+    function test_healthySeriesIsNotBlockedByTheContradictionCheck() public {
+        postNvdaSeries();
+        assertGt(gate.borrowLimitUsd(NVDAx, Form.Wrapped, 40_000 * 1e6, LTV), 0);
+    }
+
+    /// @notice Parameter errors are reported as such, not disguised as a missing tier.
+    function test_try_reportsBadParametersDistinctly() public {
+        postNvdaSeries();
+        (CollateralGate.Refusal zero,,,) = gate.tryBorrowLimitUsd(NVDAx, Form.Wrapped, 0, LTV);
+        assertEq(uint8(zero), uint8(CollateralGate.Refusal.BadParameters));
+        (CollateralGate.Refusal ltv0,,,) = gate.tryBorrowLimitUsd(NVDAx, Form.Wrapped, 1_000 * 1e6, 0);
+        assertEq(uint8(ltv0), uint8(CollateralGate.Refusal.BadParameters));
+        (CollateralGate.Refusal ltvBig,,,) = gate.tryBorrowLimitUsd(NVDAx, Form.Wrapped, 1_000 * 1e6, 10_001);
+        assertEq(uint8(ltvBig), uint8(CollateralGate.Refusal.BadParameters));
+        // And a genuinely uncovered size still reports the tier problem.
+        (CollateralGate.Refusal big,,,) = gate.tryBorrowLimitUsd(NVDAx, Form.Wrapped, 999_000 * 1e6, LTV);
+        assertEq(uint8(big), uint8(CollateralGate.Refusal.NoTierCoversAmount));
+    }
+
+    /**
+     * @notice The two entry points must never disagree about whether a loan is
+     *         allowed, or a UI would offer a loan the lender then refuses.
+     */
+    function testFuzz_strictAndTryFormsAlwaysAgree(uint256 amountUsd, uint16 ltvBps) public {
+        postNvdaSeries();
+        amountUsd = bound(amountUsd, 0, 500_000 * 1e6);
+        (CollateralGate.Refusal refusal, uint256 tryLimit,,) =
+            gate.tryBorrowLimitUsd(NVDAx, Form.Wrapped, amountUsd, ltvBps);
+
+        if (refusal == CollateralGate.Refusal.None) {
+            uint256 strict = gate.borrowLimitUsd(NVDAx, Form.Wrapped, amountUsd, ltvBps);
+            assertEq(strict, tryLimit, "try allowed it, so strict must allow the same number");
+        } else {
+            (bool ok,) = address(gate).call(
+                abi.encodeWithSelector(
+                    CollateralGate.borrowLimitUsd.selector, NVDAx, Form.Wrapped, amountUsd, ltvBps
+                )
+            );
+            assertFalse(ok, "try refused it, so strict must revert");
+        }
     }
 }

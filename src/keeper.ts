@@ -17,7 +17,8 @@
  * The private key is read into memory from a 0600 file and handed to viem. It is
  * never placed on a command line, never logged, and never written anywhere else.
  */
-import { readFileSync, writeFileSync, appendFileSync, openSync, closeSync, unlinkSync, readFileSync as rf } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, openSync, closeSync, unlinkSync, statSync, readFileSync as rf } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { createPublicClient, createWalletClient, http, defineChain, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Rpc } from "./rpc.js";
@@ -105,28 +106,52 @@ export const FEED_ABI = [
  * flock(1) on the VPS; this in-process lock is the portable backstop, because
  * macOS has no flock binary and a keeper that double-posts wastes real OKB.
  */
-export function acquireLock(path = LOCK_PATH): () => void {
+export function acquireLock(path = LOCK_PATH, attempt = 0): () => void {
+  // A token unique to this acquisition. Release only removes the file if the token
+  // still matches, so a run that overran its stale window and had its lock broken
+  // cannot delete the lock now held by its successor — which would have let a third
+  // run start alongside the second and double-post.
+  const token = `${process.pid}:${randomUUID()}`;
   try {
     const fd = openSync(path, "wx");
-    writeFileSync(fd, `${process.pid}\n${new Date().toISOString()}\n`);
+    writeFileSync(fd, `${token}\n${new Date().toISOString()}\n`);
     closeSync(fd);
   } catch (e: any) {
     if (e?.code !== "EEXIST") throw e;
-    // Break a lock left behind by a killed run, but only once it is clearly stale.
-    let stale = false;
+    if (attempt >= 2) throw new Error(`could not take ${path} after breaking a stale lock`);
+
+    // Decide staleness from the timestamp, and fall back to the file's mtime when
+    // that line is missing or unparseable. Without the fallback a zero-byte lock —
+    // exactly what a crash between create and write leaves behind — could never be
+    // broken, and the keeper would stay silent forever.
+    let ageMs: number | null = null;
     try {
       const raw = rf(path, "utf8").split("\n");
       const when = Date.parse(raw[1] ?? "");
-      stale = Number.isFinite(when) && Date.now() - when > LOCK_STALE_MS;
+      if (Number.isFinite(when)) ageMs = Date.now() - when;
     } catch {
-      stale = true;
+      /* fall through to mtime */
     }
-    if (!stale) throw new Error(`another keeper run holds ${path}`);
-    unlinkSync(path);
-    return acquireLock(path);
+    if (ageMs === null) {
+      try {
+        ageMs = Date.now() - statSync(path).mtimeMs;
+      } catch {
+        ageMs = LOCK_STALE_MS + 1; // the file vanished; treat it as gone
+      }
+    }
+    if (ageMs <= LOCK_STALE_MS) throw new Error(`another keeper run holds ${path}`);
+    try {
+      unlinkSync(path);
+    } catch {
+      /* someone else broke it first */
+    }
+    return acquireLock(path, attempt + 1);
   }
+
   return () => {
     try {
+      const held = rf(path, "utf8").split("\n")[0];
+      if (held !== token) return; // not ours any more; leave it alone
       unlinkSync(path);
     } catch {
       /* already gone */
@@ -311,8 +336,25 @@ async function main(): Promise<void> {
 
     // 3. Estimate always; send only when explicitly told to.
     if (!wantPost) {
-      const account = process.env["STATERA_PUBLISHER"] as Hex | undefined;
+      // Estimate AS THE PUBLISHER, read from the feed itself. Estimating as nobody
+      // just reverts on the publisher check and reports a useless null; estimating as
+      // the real publisher also serves as a pre-flight that the feed would ACCEPT
+      // this run, so a row the invariants reject shows up here instead of wedging the
+      // next real post. STATERA_PUBLISHER overrides it for odd setups.
+      let account = process.env["STATERA_PUBLISHER"] as Hex | undefined;
+      if (!account) {
+        try {
+          account = (await pub.readContract({
+            address: feedAddress,
+            abi: FEED_ABI,
+            functionName: "publisher",
+          })) as Hex;
+        } catch {
+          account = undefined;
+        }
+      }
       let gas: bigint | null = null;
+      let estimateError: string | null = null;
       try {
         gas = await pub.estimateContractGas({
           address: feedAddress,
@@ -323,6 +365,9 @@ async function main(): Promise<void> {
         });
       } catch (e) {
         gas = null;
+        // The revert reason is the whole value of a dry run: it names the row the
+        // feed would refuse.
+        estimateError = (e instanceof Error ? e.message : String(e)).split("\n")[0] ?? "unknown";
       }
       const gasPrice = await pub.getGasPrice();
       const px = await okbUsd();
@@ -333,6 +378,9 @@ async function main(): Promise<void> {
         gasPriceWei: Number(gasPrice),
         costOkb: gas === null ? null : Number(gas * gasPrice) / 1e18,
         costUsd: gas === null || px === null ? null : (Number(gas * gasPrice) / 1e18) * px,
+        estimatedAs: account ?? null,
+        estimateError,
+        wouldBeAccepted: gas !== null,
         note: "no transaction sent; pass --post with STATERA_KEY to publish",
       });
       return;

@@ -14,7 +14,10 @@ import {
   packReport, toUsd6, expectedGapBps, moveBps, toTuple,
   FORM_RAW, FORM_WRAPPED, STATUS_MEASURED, STATUS_ABSENT,
 } from "../src/pack.js";
-import { decide, MOVE_BPS, HEARTBEAT_SECONDS } from "../src/keeper.js";
+import { decide, acquireLock, MOVE_BPS, HEARTBEAT_SECONDS } from "../src/keeper.js";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { TOKENS } from "../src/config.js";
 import type { Report, Row } from "../src/engine.js";
 
@@ -280,4 +283,68 @@ test("an onchain row that reads back unmeasured counts as never published", () =
   const d = decide(p.rows, chain, NOW - 60, NOW);
   assert.equal(d.post, true);
   assert.match(d.reason, /never been published/);
+});
+
+/* --------------------------------------------------------------------- lock */
+
+const lockDir = mkdtempSync(join(tmpdir(), "statera-lock-"));
+let lockN = 0;
+const freshLock = () => join(lockDir, `l${lockN++}.lock`);
+
+test("the lock is exclusive while held, and releasable by its owner", () => {
+  const p = freshLock();
+  const release = acquireLock(p);
+  assert.ok(existsSync(p));
+  assert.throws(() => acquireLock(p), /another keeper run holds/);
+  release();
+  assert.ok(!existsSync(p));
+  // And it can be taken again afterwards.
+  acquireLock(p)();
+});
+
+test("a stale lock is broken so a crashed run cannot silence the keeper", () => {
+  const p = freshLock();
+  writeFileSync(p, `999999:old\n${new Date(Date.now() - 60 * 60 * 1000).toISOString()}\n`);
+  const release = acquireLock(p); // must succeed
+  assert.match(readFileSync(p, "utf8").split("\n")[0] ?? "", /^\d+:/);
+  release();
+});
+
+test("a zero-byte lock is broken via its mtime rather than wedging forever", () => {
+  // Exactly what a crash between create and write leaves behind. Before the mtime
+  // fallback, the unparseable timestamp made this lock permanent.
+  const p = freshLock();
+  writeFileSync(p, "");
+  const old = (Date.now() - 60 * 60 * 1000) / 1000;
+  utimesSync(p, old, old);
+  const release = acquireLock(p);
+  release();
+});
+
+test("a fresh zero-byte lock is still respected", () => {
+  const p = freshLock();
+  writeFileSync(p, "");
+  assert.throws(() => acquireLock(p), /another keeper run holds/);
+});
+
+test("release does not delete a lock that now belongs to someone else", () => {
+  // The overrun scenario: run A's lock goes stale, run B breaks it and takes its own,
+  // then A finishes and calls release. A must not remove B's lock, or a third run
+  // could start alongside B and double-post.
+  const p = freshLock();
+  const releaseA = acquireLock(p);
+  const aToken = readFileSync(p, "utf8").split("\n")[0];
+  // Age A's lock out and let B take it.
+  const old = (Date.now() - 60 * 60 * 1000) / 1000;
+  utimesSync(p, old, old);
+  writeFileSync(p, `999999:B\n${new Date(Date.now() - 60 * 60 * 1000).toISOString()}\n`);
+  const releaseB = acquireLock(p);
+  const bToken = readFileSync(p, "utf8").split("\n")[0];
+  assert.notEqual(aToken, bToken);
+
+  releaseA(); // late, and not the owner
+  assert.ok(existsSync(p), "A must not have removed B's lock");
+  assert.equal(readFileSync(p, "utf8").split("\n")[0], bToken);
+  releaseB();
+  assert.ok(!existsSync(p));
 });

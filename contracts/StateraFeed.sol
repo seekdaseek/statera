@@ -47,6 +47,15 @@ contract StateraFeed is IStateraFeed {
     ///      honest post never fails, far too narrow to hide a misstated gap.
     int256 public constant GAP_TOLERANCE_BPS = 1;
 
+    /// @notice A Measured row may not claim proceeds above this multiple of the
+    ///         tier's face value.
+    /// @dev The pools really can pay slightly above the mark — venue basis is a few
+    ///      basis points either way — so a bound is needed, not a prohibition. But a
+    ///      row claiming to realise twice face is not basis, it is a broken decimal
+    ///      somewhere upstream, and a consumer that believes it lends against money
+    ///      that does not exist. Two times face is generous and still blocks that.
+    uint256 public constant MAX_REALISABLE_MULTIPLE = 2;
+
     uint256 private constant USD_SCALE = 1e6;
     int256 private constant BPS = 10_000;
 
@@ -105,6 +114,12 @@ contract StateraFeed is IStateraFeed {
     /// @dev An Absent row must state what it could fill and must not state a gap.
     error AbsentRowNeedsFillable(uint256 index);
     error NonMeasuredRowHasGap(uint256 index, int32 gapBps);
+    /// @dev A fully filled tier has nothing left to "fill"; the field would be noise.
+    error MeasuredRowHasFillable(uint256 index);
+    /// @dev Absent means the tier could NOT be filled, so what did fill must be less.
+    error AbsentFillableNotBelowTier(uint256 index, uint128 fillableUsd, uint256 tierFaceUsd);
+    /// @dev Proceeds far above face are a decimal error, not a measurement.
+    error RealisableAboveBound(uint256 index, uint128 realisableUsd, uint256 maxAllowed);
     /// @dev An Unmeasured row must carry no numbers whatsoever.
     error UnmeasuredRowHasNumbers(uint256 index);
 
@@ -184,8 +199,17 @@ contract StateraFeed is IStateraFeed {
 
     /// @dev The status rules described at the top of the file, enforced.
     function _checkRowShape(RowInput calldata r, uint256 i) private pure {
+        uint256 face = uint256(r.sizeTierUsd) * USD_SCALE;
+
         if (r.status == Status.Measured) {
             if (r.markUsd == 0 || r.realisableUsd == 0) revert MeasuredRowIncomplete(i);
+            // A filled tier has no unfilled remainder to describe.
+            if (r.fillableUsd != 0) revert MeasuredRowHasFillable(i);
+            // Sanity bound, so one bad decimal cannot mint credit downstream.
+            uint256 maxRealisable = face * MAX_REALISABLE_MULTIPLE;
+            if (uint256(r.realisableUsd) > maxRealisable) {
+                revert RealisableAboveBound(i, r.realisableUsd, maxRealisable);
+            }
             int256 expected = expectedGapBps(r.sizeTierUsd, r.realisableUsd);
             int256 diff = int256(r.gapBps) - expected;
             if (diff < 0) diff = -diff;
@@ -198,6 +222,12 @@ contract StateraFeed is IStateraFeed {
 
         if (r.status == Status.Absent) {
             if (r.fillableUsd == 0) revert AbsentRowNeedsFillable(i);
+            // "Absent" asserts the tier could not be filled. A fillable amount at or
+            // above the tier's face value contradicts that, and would also inflate
+            // maxFillableUsd past anything actually observed.
+            if (uint256(r.fillableUsd) >= face) {
+                revert AbsentFillableNotBelowTier(i, r.fillableUsd, face);
+            }
             return;
         }
 

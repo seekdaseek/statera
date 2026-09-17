@@ -381,3 +381,49 @@ $9.56 at a paranoid 1-minute cadence.
 - **The `Refusal` enum returned by `tryBorrowLimitUsd` for a zero amount or a bad LTV
   is `NoTierCoversAmount`**, which is imprecise. The strict form reverts with the
   correct `ZeroAmount` / `InvalidLtv`.
+
+## Reviewed and hardened
+
+Six independent adversarial lenses were run over the contracts and keeper before any
+deployment. Nine defects were proposed; **five reproduced against the code** and were
+fixed, along with three keeper defects and one weak test. Each fix carries a
+regression test named after what it prevents.
+
+**The one that mattered.** A `Measured` row could claim proceeds far above the tier's
+face value and pass every check — including the gap check, because the gap is computed
+*from* that value, so the two agreed with each other while both were nonsense. Proved
+with a probe: a row claiming ten times face turned a $1,000 pledge into a **$10,000
+borrow limit at 100% LTV**. Two independent fixes, because a lender must not depend on
+its feed being sane:
+
+- the feed rejects a `Measured` row whose proceeds exceed `MAX_REALISABLE_MULTIPLE`
+  (2×) face — generous enough that genuine positive venue basis still posts, tight
+  enough that a misplaced decimal cannot;
+- the gate caps its valuation at face regardless of what the feed says.
+
+The rest:
+
+| defect | fix |
+|---|---|
+| `Absent` could claim a `fillableUsd` at or above the tier it declared unfillable, inflating `maxFillableUsd` past anything observed | `fillableUsd` must be strictly below the tier's face value |
+| `Measured` could carry a `fillableUsd`, which is meaningless for a filled tier | must be zero |
+| `haircutBps` reported a 100% haircut on a healthy series for a dust pledge (the value truncated to zero first) | derived from the tier, not from the pledged amount |
+| an `Absent` smaller tier did not stop the gate valuing a larger pledge, which is contradictory data | refuses with `SmallerTierNotSellable`, naming the tier that disagrees |
+| `tryBorrowLimitUsd` reported a zero amount or bad LTV as `NoTierCoversAmount` | distinct `Refusal.BadParameters` |
+| the keeper's `release()` deleted whatever lock file was present, so an overrun run could delete its successor's lock and let a third run double-post | the lock carries a per-acquisition token and is only removed by its owner |
+| a zero-byte lock — what a crash between create and write leaves — could never be broken, silencing the keeper forever | staleness falls back to the file's mtime |
+| the dry run reported a clean run with a `null` gas estimate unless an undocumented env var was set | estimates as the publisher read from the feed itself, which doubles as a pre-flight that the run **would be accepted**; reports the revert reason when it would not |
+
+One test was weak rather than wrong-headed: `testFuzz_valuationIsMonotonicInAmount`
+asserted that value always rises with the amount pledged. That is not a property of
+tiered pricing — crossing into a larger tier reprices the whole pledge at that tier's
+worse rate, so total value can dip by a hair at a boundary. It passed only until the
+fuzzer found a boundary pair. It is now split into monotonicity *within* a tier plus
+an explicit test pinning the boundary discontinuity as intended, conservative
+behaviour.
+
+Also worth recording: the review agents wrote scratch Solidity probe files into the
+working tree while testing their claims. Those were read for anything worth keeping —
+two invariants were, and were rewritten as `testFuzz_strictAndTryFormsAlwaysAgree` and
+`testFuzz_valueNeverExceedsFace` — and then deleted. Nothing agent-authored is in the
+commit.
