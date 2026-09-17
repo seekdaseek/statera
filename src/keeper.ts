@@ -17,7 +17,7 @@
  * The private key is read into memory from a 0600 file and handed to viem. It is
  * never placed on a command line, never logged, and never written anywhere else.
  */
-import { readFileSync, writeFileSync, appendFileSync, openSync, closeSync, unlinkSync, statSync, readFileSync as rf } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, openSync, closeSync, unlinkSync, statSync, fstatSync, readFileSync as rf } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -193,14 +193,35 @@ async function okbUsd(): Promise<number | null> {
   }
 }
 
+/**
+ * Is stdout the very file we append to?
+ *
+ * Under cron the line redirects stdout into /var/log/statera-keeper.log, which is
+ * also where logLine appends, so printing as well would write every record twice and
+ * make the log unparseable as JSONL. Comparing dev+ino answers the exact question
+ * rather than guessing from isTTY, so a run by hand still prints to the terminal and
+ * a run under cron writes each line once.
+ */
+const stdoutIsLogFile = ((): boolean => {
+  try {
+    const a = fstatSync(1);
+    const b = statSync(LOG_PATH);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+})();
+
 function logLine(o: Record<string, unknown>): void {
   const line = JSON.stringify({ at: new Date().toISOString(), ...o });
-  console.log(line);
+  let wrote = false;
   try {
     appendFileSync(LOG_PATH, line + "\n");
+    wrote = true;
   } catch {
     /* logging must never break a run */
   }
+  if (!wrote || !stdoutIsLogFile) console.log(line);
 }
 
 /* ------------------------------------------------------------------- main */

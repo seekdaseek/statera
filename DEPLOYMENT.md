@@ -76,7 +76,8 @@ checks:
   proves the constructor wired them rather than only that bytes landed;
 - `feed.publisher()` is the funded key; `runCount` and `lastEngineBlock` started at 0;
 - `GAP_TOLERANCE_BPS` is 1 and `MAX_REALISABLE_MULTIPLE` is 2, the reviewed values;
-- `gate.feed()` is the deployed feed and `gate.maxAgeSeconds()` is 1800.
+- `gate.feed()` is the deployed feed, and `maxAgeSeconds()` is the value that gate was
+  constructed with — 7200 on the current gate, 1800 on the superseded one.
 
 ## First post, read back
 
@@ -110,24 +111,58 @@ The publisher key lives at `~/.config/statera/deploykey` (0600, directory 0700),
 **outside the repo**. Both `script/deploy.sh` and the keeper default to that path and
 refuse a key path inside the working tree.
 
-Cron, once there is enough OKB to justify it:
+### On the VPS
+
+Installed at `/opt/statera` (no `.git`, no key), key at `/root/.config/statera/deploykey`
+(directory 0700, file 0600), which is confirmed to derive the publisher. One root cron
+line, every 10 minutes:
 
 ```
-*/5 * * * * STATERA_FEED=0x879d9a5d1Fa688DDf94b13361490746Faf8b784C /opt/statera/bin/keeper.sh --post >> /opt/statera/cron.log 2>&1
+*/10 * * * * cd /opt/statera && NODE_OPTIONS=--max-old-space-size=256 STATERA_FEED=0x879d9a5d1Fa688DDf94b13361490746Faf8b784C STATERA_KEY=/root/.config/statera/deploykey STATERA_LOCK=/opt/statera/keeper.lock /usr/bin/flock -n /var/lock/statera-keeper.lock /usr/bin/node dist/src/keeper.js --post >> /var/log/statera-keeper.log 2>&1
 ```
+
+Why each part is there:
+
+- **every 10 minutes, not every 5.** The cron rate is the sampling rate, not the post
+  rate — the policy decides whether to spend. Ten minutes is fine enough to catch a
+  100 bps move promptly and coarse enough that a 23-second run never overlaps itself.
+- **`flock -n`** drops a run whose predecessor is still going instead of queueing it.
+  The keeper also takes its own lock at `STATERA_LOCK`, because macOS has no `flock`
+  and a double post wastes real OKB. They are separate paths on purpose: `flock` holds
+  its file open for the life of the run, so sharing one path would have the keeper's
+  own lock try to break it.
+- **`--max-old-space-size=256`** against a box that had a memory-kill incident. The
+  measured peak is 111,784 kB (about 109 MiB), so the cap is headroom, not a squeeze.
+- **`STATERA_KEY` named explicitly** rather than left to resolve through `$HOME`. Cron
+  does set `HOME`, but a keeper that cannot find its key fails silently every ten
+  minutes, and the cost of being explicit is one assignment.
+- **one log file**, appended. The keeper writes JSONL itself and compares its stdout's
+  dev+ino against the log path, so a record is written once rather than twice.
+
+The crontab was backed up to `/opt/statera/crontab.bak-20260917` before the line was
+added; the other 17 lines are byte-identical to that backup. Nothing is scheduled on
+the Mac, so exactly one keeper runs anywhere.
 
 ## Balance and runway
 
-Funded 0.002902775 OKB, spent 0.000094393, **remaining 0.002808382 OKB ($0.31)**.
+Funded 0.002902775 OKB. After the feed, both gates and the first post:
+**0.002784038 OKB remaining ($0.31 at OKB $112)**.
 
-At 0.02 gwei a steady-state post costs 0.000008729 OKB, so the balance covers about
-**321 posts**:
+A measured post costs about 0.0000098 OKB at 0.02 gwei (491,962 gas). The policy will
+not spend below the 0.0003 OKB floor, so the spendable balance is 0.002484 OKB —
+about **252 posts**.
 
-| cadence | posts/day | runway |
-|---|---|---|
-| 30-min heartbeat only | 48 | ~7 days |
-| 15-min | 96 | ~3 days |
-| 5-min cron, every run posting | 288 | ~1 day |
+| cadence | posts/day | OKB/day | runs out |
+|---|---|---|---|
+| heartbeat only, 100 min | 14.4 | 0.000142 | ~17 days |
+| heartbeat + some movement | ~18 | 0.000177 | ~14 days |
+| the 18/day hard cap, every day | 18 | 0.000177 | ~14 days |
 
-The true rate sits between the heartbeat floor and the cron ceiling, since most runs
-skip. A 10x gas spike divides all of it by ten. **Top up before relying on it.**
+Thirteen days remain to 2026-09-30, so **even the worst case the policy permits reaches
+the deadline with margin**, and the floor means the tail is left unspent rather than
+dribbled away mid-day. That is the whole reason the 7200-second gate exists: the old
+1800-second gate needed 48 posts a day, which is 0.00047 OKB/day and about 5 days.
+
+A gas spike divides the runway by the spike. The cost cap refuses any post above 3x
+the steady-state figure and alerts once, so a spike stalls the feed rather than
+draining it — a stale row is refused honestly by the gate, an empty wallet cannot be.

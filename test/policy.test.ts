@@ -26,6 +26,15 @@ import { mkdtempSync, writeFileSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+/**
+ * Deliberately fake Telegram tokens. They have to match the real SHAPE, because that
+ * shape is what redact() falls back to, but they are written so that no scanner and no
+ * reader has to wonder: the id is all zeros and the secret half says so in words. The
+ * live token's SHA-256 was compared against these and differs.
+ */
+const FAKE_TOKEN = "000000000:EXAMPLE_NOT_A_REAL_TOKEN_0123456789012";
+const FAKE_LONG_ID_TOKEN = "0000000000000:EXAMPLE_NOT_A_REAL_TOKEN_0123456789012";
+
 const NOW = 1_758_000_000; // 2025-09-16T03:20:00Z
 const TODAY = utcDay(NOW);
 
@@ -385,23 +394,23 @@ test("state: an alert fires once a day per kind, and again tomorrow", () => {
 
 test("alerts: credentials are read from the env file by name", () => {
   const p = freshState();
-  writeFileSync(p, "OTHER=x\nTG_BOT_TOKEN=111111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nTG_ALERT_CHAT=-1001234567\n");
+  writeFileSync(p, `OTHER=x\nTG_BOT_TOKEN=${FAKE_TOKEN}\nTG_ALERT_CHAT=-1001234567\n`);
   const c = readCreds(p);
   assert.equal(c?.chat, "-1001234567");
-  assert.equal(c?.token.length, 45);
+  assert.equal(c?.token.length, FAKE_TOKEN.length);
 });
 
 test("alerts: a missing file or a missing key yields no credentials, not a crash", () => {
   assert.equal(readCreds(join(stateDir, "nope.env")), null);
   const p = freshState();
-  writeFileSync(p, "TG_BOT_TOKEN=111111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n");
+  writeFileSync(p, `TG_BOT_TOKEN=${FAKE_TOKEN}\n`);
   assert.equal(readCreds(p), null, "a token without a chat id is unusable");
 });
 
 test("alerts: redact removes the token, and the token SHAPE even when unknown", () => {
   // G1: the shape regex is what protects a log line the failing URL leaked into, so
   // it is checked against a known-positive first — a wrong regex here is silent.
-  const tok = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234567890";
+  const tok = FAKE_TOKEN;
   assert.match(tok, /\d{6,}:[A-Za-z0-9_-]{30,}/, "control: the fixture looks like a token");
   assert.equal(redact(`POST https://api.telegram.org/bot${tok}/sendMessage failed`, tok),
     "POST https://api.telegram.org/bot[redacted]/sendMessage failed");
@@ -410,7 +419,7 @@ test("alerts: redact removes the token, and the token SHAPE even when unknown", 
   // argument to fall back on. An anchored \\b pattern silently matched nothing here.
   assert.equal(redact(`bot${tok}/x`), "bot[redacted]/x");
   assert.ok(!redact(`bot${tok}/x`).includes("ABCdefGHI"));
-  assert.equal(redact("bot1234567890123:ABCdefGHIjklMNOpqrsTUVwxyz1234567890/x"),
+  assert.equal(redact(`bot${FAKE_LONG_ID_TOKEN}/x`),
     "bot[redacted]/x", "a longer bot id is still redacted, not skipped");
   assert.equal(redact("nothing secret here"), "nothing secret here");
 });
