@@ -7,7 +7,7 @@
 # should not be silently editable by whoever holds a key.
 #
 #   export PATH="$HOME/.foundry/bin:$PATH"
-#   cd /Volumes/D/statera
+#   cd <repo>
 #   STATERA_CONFIRM=yes STATERA_FEED=0x... STATERA_MAX_AGE=7200 \
 #     STATERA_MIN_WEI=500000000000000 sh script/deploy-gate.sh
 #

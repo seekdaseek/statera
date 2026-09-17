@@ -6,7 +6,7 @@
 # invocation cannot spend. Run one block at a time and read the output.
 #
 #   export PATH="$HOME/.foundry/bin:$PATH"
-#   cd /Volumes/D/statera
+#   cd <repo>
 #   STATERA_CONFIRM=yes sh script/deploy.sh
 #
 # Preconditions, all checked below:

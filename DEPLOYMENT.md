@@ -145,18 +145,27 @@ the Mac, so exactly one keeper runs anywhere.
 
 ## Balance and runway
 
-Funded 0.002902775 OKB. After the feed, both gates and the first post:
-**0.002784038 OKB remaining ($0.31 at OKB $112)**.
+Funded 0.002902775 OKB. After the feed, both gates, the first post and the first cron
+post: **0.002774300 OKB at 2026-09-17T18:41Z**. That number moves with every post, so
+it is a snapshot, not a claim — read it live with
+`cast balance 0x5B65b1e067270c46945e3bE5c0588FDb4dc7c018 --rpc-url https://rpc.xlayer.tech`.
 
-A measured post costs about 0.0000098 OKB at 0.02 gwei (491,962 gas). The policy will
-not spend below the 0.0003 OKB floor, so the spendable balance is 0.002484 OKB —
-about **252 posts**.
+A measured post costs **0.0000097 OKB** at 0.02 gwei (486,906 gas used, measured on
+the first cron post; the estimator quotes 491,962 beforehand). The policy will not
+spend below the 0.0003 OKB floor, so the spendable balance is about 0.002474 OKB —
+roughly **254 posts**.
+
+One note on the cost cap. It is 3x the *reference* post this budget was planned
+against, 436,458 gas ≈ 0.0000087 OKB, which is about 12% below what a warm post
+actually costs. The cap therefore trips at roughly 2.7x the real cost rather than 3x.
+That is the conservative direction for a balance that will not be topped up, so the
+reference is left as the figure the budget was set against rather than retuned upward.
 
 | cadence | posts/day | OKB/day | runs out |
 |---|---|---|---|
-| heartbeat only, 100 min | 14.4 | 0.000142 | ~17 days |
-| heartbeat + some movement | ~18 | 0.000177 | ~14 days |
-| the 18/day hard cap, every day | 18 | 0.000177 | ~14 days |
+| heartbeat only, 100 min | 14.4 | 0.000140 | ~17 days |
+| heartbeat + some movement | ~16 | 0.000156 | ~16 days |
+| the 18/day hard cap, every day | 18 | 0.000175 | ~14 days |
 
 Thirteen days remain to 2026-09-30, so **even the worst case the policy permits reaches
 the deadline with margin**, and the floor means the tail is left unspent rather than

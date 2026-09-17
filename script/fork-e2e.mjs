@@ -20,6 +20,10 @@ import { run as runEngine } from "../dist/src/engine.js";
 import { packReport, toTuple } from "../dist/src/pack.js";
 import { FEED_ABI } from "../dist/src/keeper.js";
 
+// The repo root, derived from this file rather than hardcoded, so a clone works
+// wherever it lands.
+const ROOT = new URL("..", import.meta.url).pathname;
+
 const PORT = Number(process.env["FORK_PORT"] ?? 8546);
 const LOCAL = `http://127.0.0.1:${PORT}`;
 const UPSTREAM = "https://rpc.xlayer.tech";
@@ -54,7 +58,7 @@ function forgeCreate(what, args, key) {
   const out = execFileSync(
     `${FOUNDRY_BIN}/forge`,
     ["create", what, "--rpc-url", LOCAL, "--private-key", key, "--broadcast", ...(args.length ? ["--constructor-args", ...args] : [])],
-    { cwd: "/Volumes/D/statera", encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   const m = out.match(/Deployed to:\s*(0x[0-9a-fA-F]{40})/);
   if (!m) throw new Error(`could not parse deploy output for ${what}:\n${out}`);

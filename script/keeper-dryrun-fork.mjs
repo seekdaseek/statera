@@ -21,16 +21,20 @@ import { run as runEngine } from "../dist/src/engine.js";
 import { packReport, toTuple } from "../dist/src/pack.js";
 import { FEED_ABI } from "../dist/src/keeper.js";
 
+// The repo root, derived from this file rather than hardcoded, so a clone works
+// wherever it lands.
+const ROOT = new URL("..", import.meta.url).pathname;
+
 const PORT = Number(process.env["FORK_PORT"] ?? 8571);
 const LOCAL = `http://127.0.0.1:${PORT}`;
 const UPSTREAM = "https://rpc.xlayer.tech";
 const BIN = `${process.env["HOME"]}/.foundry/bin`;
-const PUBLISHER = readFileSync("/Volumes/D/statera/.deploykey.address", "utf8").trim();
+const PUBLISHER = readFileSync(new URL("../.deploykey.address", import.meta.url), "utf8").trim();
 
 function runKeeper(feed, extraEnv = {}) {
   try {
     return execFileSync("node", ["dist/src/keeper.js"], {
-      cwd: "/Volumes/D/statera",
+      cwd: ROOT,
       encoding: "utf8",
       env: {
         ...process.env,
@@ -84,7 +88,7 @@ async function main() {
     const out = execFileSync(
       `${BIN}/forge`,
       ["create", "contracts/StateraFeed.sol:StateraFeed", "--rpc-url", LOCAL, "--private-key", devKey, "--broadcast", "--constructor-args", PUBLISHER],
-      { cwd: "/Volumes/D/statera", encoding: "utf8" },
+      { cwd: ROOT, encoding: "utf8" },
     );
     const feed = out.match(/Deployed to:\s*(0x[0-9a-fA-F]{40})/)[1];
     console.log(`StateraFeed on the fork: ${feed}`);
