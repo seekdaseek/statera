@@ -19,6 +19,8 @@
  */
 import { readFileSync, writeFileSync, appendFileSync, openSync, closeSync, unlinkSync, statSync, readFileSync as rf } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { createPublicClient, createWalletClient, http, defineChain, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Rpc } from "./rpc.js";
@@ -261,7 +263,8 @@ async function main(): Promise<void> {
   // lets a fork test post locally while still measuring the real chain.
   const rpcUrl = process.env["STATERA_RPC"] ?? DEFAULT_RPC;
   const chainRpcUrl = process.env["STATERA_CHAIN_RPC"] ?? rpcUrl;
-  const keyPath = process.env["STATERA_KEY"] ?? "/Volumes/D/statera/.deploykey";
+  // Secrets never live inside a git working tree; the default is outside the repo.
+  const keyPath = process.env["STATERA_KEY"] ?? join(homedir(), ".config", "statera", "deploykey");
 
   if (!feedAddress) throw new Error("set STATERA_FEED to the deployed StateraFeed address");
 
@@ -387,6 +390,12 @@ async function main(): Promise<void> {
     }
 
     // 4. Send.
+    // Refuse a key path inside the repo, so a future convenience edit cannot
+    // reintroduce a secret into the working tree.
+    const repoRoot = resolve(new URL("../..", import.meta.url).pathname);
+    if (resolve(keyPath).startsWith(repoRoot + "/")) {
+      throw new Error(`refusing to read a key from inside the repo: ${keyPath}`);
+    }
     const key = readFileSync(keyPath, "utf8").trim() as Hex;
     const account = privateKeyToAccount(key);
     const wallet = createWalletClient({ account, chain: xlayer, transport: http(chainRpcUrl) });

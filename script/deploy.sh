@@ -10,7 +10,7 @@
 #   STATERA_CONFIRM=yes sh script/deploy.sh
 #
 # Preconditions, all checked below:
-#   - .deploykey exists, 0600, and derives the address in .deploykey.address
+#   - the key exists outside the repo, 0600, and derives .deploykey.address
 #   - that address holds enough OKB on X Layer
 #   - the Solidity suite passes
 set -eu
@@ -19,7 +19,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 RPC="${STATERA_RPC:-https://rpc.xlayer.tech}"
 MAX_AGE="${STATERA_MAX_AGE:-1800}"
-KEY_FILE="$ROOT/.deploykey"
+# Secrets never live inside a git working tree. Default is outside the repo; override
+# with STATERA_KEY, which must also be outside it (checked below).
+KEY_FILE="${STATERA_KEY:-$HOME/.config/statera/deploykey}"
 ADDR_FILE="$ROOT/.deploykey.address"
 MIN_WEI="${STATERA_MIN_WEI:-20000000000000000}" # 0.02 OKB
 
@@ -30,6 +32,9 @@ if [ "${STATERA_CONFIRM:-no}" != "yes" ]; then
 fi
 
 [ -f "$KEY_FILE" ] || { echo "missing $KEY_FILE"; exit 1; }
+case "$(cd "$(dirname "$KEY_FILE")" && pwd)" in
+  "$ROOT"|"$ROOT"/*) echo "refusing: $KEY_FILE is inside the repo; keys must live outside a git tree"; exit 1 ;;
+esac
 [ -f "$ADDR_FILE" ] || { echo "missing $ADDR_FILE"; exit 1; }
 
 PERMS="$(stat -f '%Lp' "$KEY_FILE" 2>/dev/null || stat -c '%a' "$KEY_FILE")"
