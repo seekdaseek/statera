@@ -1,0 +1,22 @@
+{
+  "name": "statera",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Three numbers for tokenized stocks on X Layer: an independent mark, the realisable value of selling a size into live onchain liquidity, and the gap in bps.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "json": "node dist/src/index.js --json",
+    "test": "tsc && node --test \"dist/test/*.test.js\"",
+    "test:unit": "tsc && node --test \"dist/test/v3math.test.js\"",
+    "test:live": "tsc && node --test \"dist/test/live.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
