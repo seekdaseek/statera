@@ -65,9 +65,24 @@ async function main() {
   console.log("statera fork end-to-end");
   console.log(`forking ${UPSTREAM} into anvil on ${LOCAL}\n`);
 
-  const anvil = spawn(`${FOUNDRY_BIN}/anvil`, ["--fork-url", UPSTREAM, "--port", String(PORT), "--accounts", "1"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // The engine runs FIRST, and the fork is then pinned to the exact block it read.
+  // The feed refuses an engine block above the chain head — correct in production,
+  // where the transaction always lands after the block that was measured — so a fork
+  // frozen at an earlier block than the live chain could never accept the post.
+  // Pinning also makes this test reproducible: same block, same numbers.
+  console.log("running the live engine against X Layer");
+  const report = await runEngine(new Rpc({ url: UPSTREAM }));
+  const packed = packReport(report);
+  console.log(`  engine block ${report.block}, ${packed.rows.length} postable rows, ${packed.dropped.length} dropped`);
+  for (const d of packed.dropped) console.log(`  dropped ${d.label}: ${d.reason}`);
+  if (packed.rows.length === 0) throw new Error("engine produced nothing postable; cannot exercise the feed");
+  console.log(`  pinning the fork to block ${packed.engineBlock}\n`);
+
+  const anvil = spawn(
+    `${FOUNDRY_BIN}/anvil`,
+    ["--fork-url", UPSTREAM, "--fork-block-number", String(packed.engineBlock), "--port", String(PORT), "--accounts", "1"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   let buf = "";
   let devKey = null;
   const ready = new Promise((resolve, reject) => {
@@ -110,13 +125,6 @@ async function main() {
     console.log(`  StateraFeed    ${feed}`);
     console.log(`  CollateralGate ${gate}\n`);
 
-    console.log("running the live engine against X Layer");
-    const report = await runEngine(new Rpc({ url: UPSTREAM }));
-    const packed = packReport(report);
-    console.log(`  engine block ${report.block}, ${packed.rows.length} postable rows, ${packed.dropped.length} dropped\n`);
-    for (const d of packed.dropped) console.log(`  dropped ${d.label}: ${d.reason}`);
-
-    if (packed.rows.length === 0) throw new Error("engine produced nothing postable; cannot exercise the feed");
 
     console.log("posting the run in one transaction");
     const hash = await wallet.writeContract({

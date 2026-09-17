@@ -33,7 +33,10 @@ export class Rpc {
 
   constructor(o: RpcOpts = {}) {
     this.url = o.url ?? process.env["STATERA_RPC"] ?? "https://rpc.xlayer.tech";
-    this.timeoutMs = o.timeoutMs ?? 20_000;
+    // A cold archive node, or an anvil fork proxying uncached calls upstream, can
+    // take far longer per request than the public endpoint does. Overridable so a
+    // slow backend degrades in speed rather than failing the run.
+    this.timeoutMs = o.timeoutMs ?? Number(process.env["STATERA_RPC_TIMEOUT_MS"] ?? 20_000);
     this.retries = o.retries ?? 3;
     // rpc.xlayer.tech rejects batches above 10 with -32014 "too many RPC calls
     // in batch request" (measured: 10 ok, 11 not), so batches are capped there.

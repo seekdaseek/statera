@@ -108,6 +108,8 @@ contract StateraFeed is IStateraFeed {
     error ZeroTier();
     error EngineBlockWentBackwards(uint40 posted, uint40 last);
     error ZeroEngineBlock();
+    /// @dev The engine cannot have read a block that has not happened yet.
+    error EngineBlockInFuture(uint40 posted, uint256 head);
     /// @dev A Measured row must carry both values and a gap consistent with them.
     error MeasuredRowIncomplete(uint256 index);
     error GapInconsistent(uint256 index, int32 posted, int256 expected);
@@ -141,6 +143,15 @@ contract StateraFeed is IStateraFeed {
         if (msg.sender != publisher) revert NotPublisher(msg.sender);
         if (rows.length == 0) revert NoRows();
         if (engineBlock == 0) revert ZeroEngineBlock();
+        // The engine reads a block that has already been mined, so a value above the
+        // current head is always a mistake. Rejecting it is not pedantry: combined
+        // with the monotonicity rule below, one fat-fingered engineBlock — a units
+        // error, a timestamp pasted into the wrong argument — would raise
+        // lastEngineBlock beyond any real block number and make every future post
+        // revert forever. With an immutable publisher and no admin there would be no
+        // way back: the feed would be permanently dead. This bound makes that
+        // unreachable, because lastEngineBlock can never exceed the head.
+        if (engineBlock > block.number) revert EngineBlockInFuture(engineBlock, block.number);
         if (engineBlock < lastEngineBlock) revert EngineBlockWentBackwards(engineBlock, lastEngineBlock);
 
         uint48 now48 = uint48(block.timestamp);

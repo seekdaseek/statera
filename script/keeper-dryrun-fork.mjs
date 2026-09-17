@@ -36,8 +36,11 @@ function runKeeper(feed, extraEnv = {}) {
         ...process.env,
         STATERA_FEED: feed,
         STATERA_CHAIN_RPC: LOCAL, // the feed lives on the fork
-        STATERA_RPC: UPSTREAM, // the engine measures the real chain
+        STATERA_RPC: LOCAL, // measure and post on the same chain, as in production
         STATERA_PUBLISHER: PUBLISHER, // for gas estimation only; no key is used
+        // A cold fork proxies every uncached read upstream, so the first engine pass
+        // is far slower than against the public endpoint.
+        STATERA_RPC_TIMEOUT_MS: "120000",
         STATERA_LOCK: `/tmp/statera-keeper-dryrun-${PORT}.lock`,
         STATERA_KEEPER_LOG: `/tmp/statera-keeper-dryrun-${PORT}.log`,
         ...extraEnv,
@@ -70,7 +73,9 @@ async function main() {
         res();
       }
     });
-    anvil.on("exit", (c) => rej(new Error(`anvil exited ${c}`)));
+    let errBuf = "";
+    anvil.stderr.on("data", (d) => { errBuf += d.toString(); });
+    anvil.on("exit", (c) => rej(new Error(`anvil exited ${c}: ${errBuf.trim().split("\n").slice(-3).join(" | ") || "(no stderr)"}`)));
   });
 
   try {
@@ -104,8 +109,10 @@ async function main() {
     await pub.request({ method: "anvil_impersonateAccount", params: [PUBLISHER] });
     await pub.request({ method: "anvil_setBalance", params: [PUBLISHER, "0xde0b6b3a7640000"] });
 
-    const report = await runEngine(new Rpc({ url: UPSTREAM }));
+    // Same chain for measuring and posting, so engineBlock <= head by construction.
+    const report = await runEngine(new Rpc({ url: LOCAL }));
     const packed = packReport(report);
+
     const impersonated = createWalletClient({ account: PUBLISHER, chain, transport: http(LOCAL) });
     const hash = await impersonated.writeContract({
       address: feed,

@@ -29,6 +29,9 @@ contract CollateralGateTest is Test {
         feed = new StateraFeed(publisher);
         gate = new CollateralGate(IStateraFeed(address(feed)), MAX_AGE);
         vm.warp(1_750_000_000);
+        // A chain head above ENGINE_BLOCK: the feed refuses an engine block from the
+        // future, and the default head of 1 would make every post here look future.
+        vm.roll(ENGINE_BLOCK + 1_000);
     }
 
     /* ------------------------------------------------------------- helpers */

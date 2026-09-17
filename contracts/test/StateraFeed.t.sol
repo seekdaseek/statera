@@ -19,6 +19,9 @@ contract StateraFeedTest is Test {
         feed = new StateraFeed(publisher);
         // A sane wall clock; the default of 1 makes freshness arithmetic awkward.
         vm.warp(1_750_000_000);
+        // And a chain head above ENGINE_BLOCK, since the feed now refuses an engine
+        // block from the future.
+        vm.roll(ENGINE_BLOCK + 1_000);
     }
 
     /* ------------------------------------------------------------- helpers */
@@ -630,5 +633,42 @@ contract StateraFeedTest is Test {
         vm.prank(publisher);
         (bool ok,) = address(feed).call(payload);
         assertFalse(ok, "a status outside the enum must not decode");
+    }
+
+    /**
+     * @notice The bound that keeps the feed recoverable.
+     *
+     * Without it, one engineBlock above any real block number — a units error, a
+     * timestamp pasted into the wrong argument — raises lastEngineBlock beyond the
+     * chain and makes every later post revert on monotonicity. The publisher is
+     * immutable and there is no admin, so nothing could ever fix it: the feed would
+     * be permanently dead. This is the test that would have caught that.
+     */
+    function test_post_refusesAnEngineBlockFromTheFuture() public {
+        uint40 future = uint40(block.number + 1);
+        vm.prank(publisher);
+        vm.expectRevert(abi.encodeWithSelector(StateraFeed.EngineBlockInFuture.selector, future, block.number));
+        feed.post(future, one(measured(NVDAx, Form.Wrapped, 1000, 220_018_700, 997_600_000)));
+    }
+
+    function test_post_acceptsTheCurrentHead() public {
+        vm.prank(publisher);
+        feed.post(uint40(block.number), one(measured(NVDAx, Form.Wrapped, 1000, 220_018_700, 997_600_000)));
+        assertEq(feed.lastEngineBlock(), uint40(block.number));
+    }
+
+    /// @notice And therefore a fat-fingered value can never brick the feed: after the
+    ///         rejection, an honest post still works.
+    function test_post_cannotBeBrickedByABadEngineBlock() public {
+        uint40 absurd = uint40(1_000_000_000_000); // ~1e12, fits uint40, far past any head
+        vm.prank(publisher);
+        vm.expectRevert(abi.encodeWithSelector(StateraFeed.EngineBlockInFuture.selector, absurd, block.number));
+        feed.post(absurd, one(measured(NVDAx, Form.Wrapped, 1000, 220_018_700, 997_600_000)));
+
+        // lastEngineBlock was never poisoned, so normal service continues.
+        assertEq(feed.lastEngineBlock(), 0);
+        vm.prank(publisher);
+        feed.post(uint40(block.number), one(measured(NVDAx, Form.Wrapped, 1000, 220_018_700, 997_600_000)));
+        assertEq(feed.runCount(), 1);
     }
 }
