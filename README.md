@@ -528,3 +528,7 @@ working tree while testing their claims. Those were read for anything worth keep
 two invariants were, and were rewritten as `testFuzz_strictAndTryFormsAlwaysAgree` and
 `testFuzz_valueNeverExceedsFace` — and then deleted. Nothing agent-authored is in the
 commit.
+
+## Licence
+
+MIT. See LICENSE.
