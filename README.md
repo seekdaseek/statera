@@ -389,7 +389,32 @@ deployment. Nine defects were proposed; **five reproduced against the code** and
 fixed, along with three keeper defects and one weak test. Each fix carries a
 regression test named after what it prevents.
 
-**The one that mattered.** A `Measured` row could claim proceeds far above the tier's
+**The worst one was never verified by the review at all.** Its verifier agents died on
+a session limit, so "engineBlock is never bounded" arrived with no verdict. Triaged by
+hand, it reproduced — and it was the most severe of the set. `post` took `engineBlock`
+from the publisher and only checked it was non-zero and not going backwards. A single
+fat-fingered value — a units error, a timestamp pasted into the wrong argument —
+raises `lastEngineBlock` beyond any real block number, after which **every future post
+reverts on monotonicity, forever**. With an immutable publisher and no admin there is
+no way back: the feed would be permanently dead. The fix is the bound that was always
+implied, since the engine reads a block that has already been mined:
+
+```solidity
+if (engineBlock > block.number) revert EngineBlockInFuture(engineBlock, block.number);
+```
+
+`lastEngineBlock` can now never exceed the chain head, so an honest post always
+succeeds. `test_post_cannotBeBrickedByABadEngineBlock` pins it.
+
+That bound has a consequence worth knowing operationally: the engine's block must be
+at or below the head of the chain the feed lives on. In production that is automatic —
+the engine reads block N and the transaction lands at N+k. On a fork it is not, because
+the fork's head is frozen while the live chain advances, so `script/fork-e2e.mjs` now
+runs the engine first and pins the fork to exactly the block it measured (which also
+makes the test reproducible), and `script/keeper-dryrun-fork.mjs` points the engine at
+the fork so measuring and posting share one chain, as they do in production.
+
+**The one the review did confirm as reproducing.** A `Measured` row could claim proceeds far above the tier's
 face value and pass every check — including the gap check, because the gap is computed
 *from* that value, so the two agreed with each other while both were nonsense. Proved
 with a probe: a row claiming ten times face turned a $1,000 pledge into a **$10,000
@@ -413,6 +438,16 @@ The rest:
 | the keeper's `release()` deleted whatever lock file was present, so an overrun run could delete its successor's lock and let a third run double-post | the lock carries a per-acquisition token and is only removed by its owner |
 | a zero-byte lock — what a crash between create and write leaves — could never be broken, silencing the keeper forever | staleness falls back to the file's mtime |
 | the dry run reported a clean run with a `null` gas estimate unless an undocumented env var was set | estimates as the publisher read from the feed itself, which doubles as a pre-flight that the run **would be accepted**; reports the revert reason when it would not |
+
+**How to read the review's own verdict.** The workflow returned zero confirmed
+findings, and that number is an artifact, not a result. Its verifiers ran after the
+fixes had already landed in the working tree, so they correctly found the checks
+present and refuted each finding as already-closed — several said so explicitly,
+noting the finding "would have been valid against HEAD 6f70b2f". Separately, 52 of its
+81 agents died on a session limit, so most findings never got a verdict at all. The
+evidence that these defects were real is not the workflow's vote: it is that each one
+was reproduced against the pre-fix code with a probe test that asserted the buggy
+behaviour and passed, then failed once the fix landed.
 
 One test was weak rather than wrong-headed: `testFuzz_valuationIsMonotonicInAmount`
 asserted that value always rises with the amount pledged. That is not a property of
