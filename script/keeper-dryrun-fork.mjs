@@ -36,14 +36,15 @@ function runKeeper(feed, extraEnv = {}) {
         ...process.env,
         STATERA_FEED: feed,
         STATERA_CHAIN_RPC: LOCAL, // the feed lives on the fork
-        STATERA_RPC: LOCAL, // measure and post on the same chain, as in production
+        STATERA_RPC: UPSTREAM, // fast archive reads
+        STATERA_ENGINE_BLOCK: String(extraEnv.__pin ?? ""), // pinned to the fork's head
         STATERA_PUBLISHER: PUBLISHER, // for gas estimation only; no key is used
         // A cold fork proxies every uncached read upstream, so the first engine pass
         // is far slower than against the public endpoint.
         STATERA_RPC_TIMEOUT_MS: "120000",
         STATERA_LOCK: `/tmp/statera-keeper-dryrun-${PORT}.lock`,
         STATERA_KEEPER_LOG: `/tmp/statera-keeper-dryrun-${PORT}.log`,
-        ...extraEnv,
+        ...Object.fromEntries(Object.entries(extraEnv).filter(([k]) => !k.startsWith("__"))),
       },
     });
   } catch (e) {
@@ -89,8 +90,15 @@ async function main() {
     console.log(`StateraFeed on the fork: ${feed}`);
     console.log(`  publisher set to the real key's address, which holds no OKB\n`);
 
+    const forkHead = Number(await (await import("viem")).createPublicClient({
+      chain: defineChain({ id: 196, name: "fork", nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 }, rpcUrls: { default: { http: [LOCAL] } } }),
+      transport: http(LOCAL),
+    }).getBlockNumber());
+    console.log(`fork head ${forkHead}; the engine is pinned to it so the feed's`);
+    console.log(`engine-block bound is satisfied without mining the fork forward\n`);
+
     console.log("--- run 1: empty feed, keeper must decide to POST ---");
-    const r1 = runKeeper(feed);
+    const r1 = runKeeper(feed, { __pin: forkHead });
     console.log(r1.trim().split("\n").slice(-1)[0]);
     const j1 = JSON.parse(r1.trim().split("\n").filter((l) => l.startsWith("{")).pop());
     console.log(`  event=${j1.event} decision="${j1.decision}" rows=${j1.rows} gasEstimate=${j1.gasEstimate}`);
@@ -110,7 +118,8 @@ async function main() {
     await pub.request({ method: "anvil_setBalance", params: [PUBLISHER, "0xde0b6b3a7640000"] });
 
     // Same chain for measuring and posting, so engineBlock <= head by construction.
-    const report = await runEngine(new Rpc({ url: LOCAL }));
+    process.env["STATERA_ENGINE_BLOCK"] = String(forkHead);
+    const report = await runEngine(new Rpc({ url: UPSTREAM }));
     const packed = packReport(report);
 
     const impersonated = createWalletClient({ account: PUBLISHER, chain, transport: http(LOCAL) });
@@ -125,7 +134,7 @@ async function main() {
     void wallet;
 
     console.log("\n--- run 2: feed already current, keeper must decide to SKIP ---");
-    const r2 = runKeeper(feed);
+    const r2 = runKeeper(feed, { __pin: forkHead });
     const j2 = JSON.parse(r2.trim().split("\n").filter((l) => l.startsWith("{")).pop());
     console.log(`  event=${j2.event} decision="${j2.decision}"`);
     const moved = (j2.moved ?? []).filter((m) => m.bps > 5);
@@ -140,7 +149,7 @@ async function main() {
     console.log("\n--- run 3: lock must prevent an overlapping run ---");
     const lock = `/tmp/statera-keeper-lockcheck-${PORT}.lock`;
     execFileSync("sh", ["-c", `printf '%s\\n%s\\n' 99999 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > ${lock}`]);
-    const r3 = runKeeper(feed, { STATERA_LOCK: lock });
+    const r3 = runKeeper(feed, { STATERA_LOCK: lock, __pin: forkHead });
     const held = /another keeper run holds/.test(r3);
     console.log(`  ${held ? "ok" : "FAIL"}  refused to run while the lock was held`);
 

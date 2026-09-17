@@ -142,7 +142,13 @@ export async function run(rpc: Rpc): Promise<Report> {
   const warnings: string[] = [];
   const chainId = await rpc.chainId();
   if (chainId !== CHAIN_ID) throw new Error(`wrong chain: expected ${CHAIN_ID}, got ${chainId}`);
-  const block = await rpc.blockNumber();
+  // STATERA_ENGINE_BLOCK pins the report to a specific block instead of the head.
+  // Useful for a reproducible report or a backtest, and necessary against a forked
+  // chain: the feed refuses an engine block above the head it sees, and a fork's head
+  // is frozen while the live chain runs on.
+  const pinned = process.env["STATERA_ENGINE_BLOCK"];
+  const block = pinned ? Number(pinned) : await rpc.blockNumber();
+  if (!Number.isFinite(block) || block <= 0) throw new Error(`bad engine block: ${pinned ?? "head"}`);
   const tag = blockTag(block);
 
   // Load every pool once, pinned to `block`.

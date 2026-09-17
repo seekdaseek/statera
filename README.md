@@ -362,18 +362,23 @@ X Layer gas 0.02 gwei, OKB $112.05, measured on a fork:
 
 | item | gas | OKB | USD |
 |---|---|---|---|
-| deploy StateraFeed | 1,619,646 | 0.000032393 | $0.0036 |
-| deploy CollateralGate | 1,007,649 | 0.000020153 | $0.0023 |
-| post 18 rows, first write | 1,752,948 | 0.000035059 | $0.0039 |
-| post 18 rows, steady state | 423,174 | 0.000008463 | $0.0010 |
+| deploy StateraFeed | 1,736,186 | 0.000034724 | $0.0039 |
+| deploy CollateralGate | 1,217,171 | 0.000024343 | $0.0027 |
+| post 18 rows, first write | 1,766,304 | 0.000035326 | $0.0040 |
+| post 18 rows, steady state | 436,458 | 0.000008729 | $0.0010 |
 
-Seven days of posting: $0.32 at the 30-minute heartbeat, $1.91 at a 5-minute cron,
-$9.56 at a paranoid 1-minute cadence.
+Seven days of posting: $0.33 at the 30-minute heartbeat, $1.99 at a 5-minute cron,
+$9.89 at a paranoid 1-minute cadence. Funding ask **0.11 OKB (~$12)**, which is 1.25x
+the worst measured week and about six weeks at the realistic cadence.
 
 ## Not settled in phase 2
 
 - **Nothing is deployed.** Every number above comes from a fork. Mainnet behaviour is
   UNTESTED until phase 3.
+- **`STATERA_ENGINE_BLOCK`** pins a report to a specific block instead of the head.
+  It exists for reproducible reports and backtests, and it is what lets the fork
+  harnesses satisfy the engine-block bound: mining a fork forward is not an option at
+  a measured 1.66 s per block.
 - **The keeper has never sent a transaction.** The signing path is written and the
   publisher check is exercised on a fork, but `--post` has never been used against
   mainnet.
