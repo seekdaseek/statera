@@ -209,14 +209,15 @@ All verified on-chain: `symbol()`/`decimals()` read from each token, and
 # Phase 2 — the onchain half
 
 A feed contract on X Layer, a keeper that posts the engine's numbers, and an example
-lender that consumes them. Nothing is deployed yet; everything below is exercised on
-a fork.
+lender that consumes them. All three are live on X Layer mainnet — addresses at the
+top of this file. The commands below exercise the same code against a fork, so none
+of them touch mainnet or spend OKB.
 
 ```bash
 export PATH="$HOME/.foundry/bin:$PATH"
 forge test                                   # 85 Solidity tests
 forge test --fork-url https://rpc.xlayer.tech # the same 85, against real chain state
-npm test                                     # 46 TypeScript tests
+npm test                                     # 94 TypeScript tests, 6 of them live RPC
 node script/fork-e2e.mjs                     # live engine -> forked feed -> gate
 node script/gas-estimate.mjs                 # measured cost, priced in OKB and USD
 node script/keeper-dryrun-fork.mjs           # the keeper, signing nothing
