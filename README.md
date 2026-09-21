@@ -437,15 +437,16 @@ the worst measured week and about six weeks at the realistic cadence.
 
 ## Not settled in phase 2
 
-- **Nothing is deployed.** Every number above comes from a fork. Mainnet behaviour is
-  UNTESTED until phase 3.
+- **Gas figures above come from a fork.** The contracts are deployed and the keeper has
+  been posting since 17 September, so mainnet cost can now be read off the transactions
+  on the feed address rather than modelled.
 - **`STATERA_ENGINE_BLOCK`** pins a report to a specific block instead of the head.
   It exists for reproducible reports and backtests, and it is what lets the fork
   harnesses satisfy the engine-block bound: mining a fork forward is not an option at
   a measured 1.66 s per block.
-- **The keeper has never sent a transaction.** The signing path is written and the
-  publisher check is exercised on a fork, but `--post` has never been used against
-  mainnet.
+- **The keeper posts to mainnet unattended** under cron since 17 September. The live
+  count is whatever `runCount()` returns on the feed; the posts themselves are the
+  transaction list on that address.
 - **No audit.** The contracts are reviewed and tested, not audited.
 - **The `Refusal` enum returned by `tryBorrowLimitUsd` for a zero amount or a bad LTV
   is `NoTierCoversAmount`**, which is imprecise. The strict form reverts with the
