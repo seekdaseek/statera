@@ -5,13 +5,15 @@ by side: an **independent mark**, the **realisable value** of selling a given si
 into live onchain liquidity, and the **gap in basis points** — each with a status
 of `measured`, `absent` or `unmeasured`.
 
+**Live page: [statera.ochinimus.workers.dev](https://statera.ochinimus.workers.dev)** — the three numbers, read out of the feed by your own browser. No backend, no API key.
+
 ## Live on X Layer
 
-| contract | address | Sourcify |
-|---|---|---|
-| StateraFeed | [`0x879d9a5d1Fa688DDf94b13361490746Faf8b784C`](https://www.oklink.com/x-layer/address/0x879d9a5d1fa688ddf94b13361490746faf8b784c) | [exact_match](https://repo.sourcify.dev/196/0x879d9a5d1Fa688DDf94b13361490746Faf8b784C) |
-| CollateralGate — **current**, maxAge 7200s | [`0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA`](https://www.oklink.com/x-layer/address/0x12c23e1cce2ee3246a3161852d2ca7d6cfe4b9da) | [exact_match](https://repo.sourcify.dev/196/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA) |
-| CollateralGate — superseded, maxAge 1800s | [`0x5Ab5C851246c7056B90245af6639e9446BF1Ad79`](https://www.oklink.com/x-layer/address/0x5ab5c851246c7056b90245af6639e9446bf1ad79) | [exact_match](https://repo.sourcify.dev/196/0x5Ab5C851246c7056B90245af6639e9446BF1Ad79) |
+| contract | address | OKLink | Sourcify |
+|---|---|---|---|
+| StateraFeed | [`0x879d9a5d1Fa688DDf94b13361490746Faf8b784C`](https://www.oklink.com/x-layer/address/0x879d9a5d1fa688ddf94b13361490746faf8b784c) | [verified](https://www.oklink.com/x-layer/evm/address/0x879d9a5d1Fa688DDf94b13361490746Faf8b784C/contract) | [exact_match](https://repo.sourcify.dev/196/0x879d9a5d1Fa688DDf94b13361490746Faf8b784C)|
+| CollateralGate — **current**, maxAge 7200s | [`0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA`](https://www.oklink.com/x-layer/address/0x12c23e1cce2ee3246a3161852d2ca7d6cfe4b9da) | [verified](https://www.oklink.com/x-layer/evm/address/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA/contract) | [exact_match](https://repo.sourcify.dev/196/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA)|
+| CollateralGate — superseded, maxAge 1800s | [`0x5Ab5C851246c7056B90245af6639e9446BF1Ad79`](https://www.oklink.com/x-layer/address/0x5ab5c851246c7056b90245af6639e9446bf1ad79) | not verified | [exact_match](https://repo.sourcify.dev/196/0x5Ab5C851246c7056B90245af6639e9446BF1Ad79)|
 
 Chain 196. The publisher is immutable and there is no admin, so these cannot be
 repointed, upgraded or taken over by anyone, including the deployer. Point new
