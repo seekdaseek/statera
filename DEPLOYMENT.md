@@ -54,14 +54,33 @@ forge verify-contract <address> contracts/<C>.sol:<C> --chain 196 --verifier sou
 | CollateralGate 7200 (current) | [exact_match](https://repo.sourcify.dev/196/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA) · verified 2026-09-17T17:50:51Z |
 | CollateralGate 1800 (superseded) | [exact_match](https://repo.sourcify.dev/196/0x5Ab5C851246c7056B90245af6639e9446BF1Ad79) · verified 2026-09-17T16:45:24Z |
 
-**OKLink — UNVERIFIED, and it needs an account.** Its `verify-source-code` endpoint
-accepted a keyless submission for both contracts (`{"code":"0"}` plus a job GUID:
-`b243d4905f39482ba7543f42412c1b21` for the feed, `84ccf9c1e26a4f2ea001a5072b0458f8`
-for the gate), but the explorer still showed "unverified" ten minutes later, and the
-outcome cannot be diagnosed without a key: `check-verify-status` returned
-`50404 URL not found` on the path tried, and the address-information read API returns
-`401`. **What it needs:** a free OKLink account to obtain an `Ok-Access-Key`, then
-re-submit with that header and poll the status endpoint named in their current docs.
+**OKLink — verified for both current contracts, and it needs no account.**
+The REST route is a dead end without a key, and that is worth recording: a keyless
+`verify-source-code` submission was accepted for both contracts (`{"code":"0"}` plus job
+GUIDs `b243d4905f39482ba7543f42412c1b21` for the feed and `84ccf9c1e26a4f2ea001a5072b0458f8`
+for the gate), the explorer still showed unverified ten minutes later,
+`check-verify-status` returned `50404 URL not found`, and the address-information read
+API returns `401`.
+
+The web form does work, with nothing but a browser:
+`oklink.com/x-layer/verify-contract-preliminary`, compiler type
+**Solidity (Standard-Json-Input)**, compiler **v0.8.28+commit.7893614a**. Generate the
+input straight from the build:
+
+```
+forge verify-contract --show-standard-json-input <address> contracts/<C>.sol:<C> > <C>.json
+```
+
+OKLink fills the constructor arguments itself, read out of the deployment transaction.
+They matched `cast abi-encode` byte for byte for both contracts, so the address, the
+source and the deployed bytecode agree by three independent routes.
+
+| contract | OKLink |
+|---|---|
+| StateraFeed | [verified](https://www.oklink.com/x-layer/evm/address/0x879d9a5d1Fa688DDf94b13361490746Faf8b784C/contract) · 2026-09-21 |
+| CollateralGate 7200 (current) | [verified](https://www.oklink.com/x-layer/evm/address/0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA/contract) · 2026-09-21 |
+| CollateralGate 1800 (superseded) | not submitted |
+
 Independent bytecode verification does not depend on this — see below.
 
 ## Verified onchain, independently of any explorer
