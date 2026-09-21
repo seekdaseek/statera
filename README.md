@@ -21,8 +21,9 @@ integrations at the **7200-second gate**; the 1800-second one is left live for
 anything already using it, and simply refuses sooner. Full record, with transaction
 hashes and how each was verified, in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-Read-only. It signs nothing, sends nothing and holds no keys. The only JSON-RPC
-methods used are `eth_chainId`, `eth_blockNumber`, `eth_call`, `eth_getStorageAt`
+The reporting engine is read-only. It signs nothing, sends nothing and holds no
+keys. The keeper in phase 2 is the only part that transacts. The engine's only
+JSON-RPC methods are `eth_chainId`, `eth_blockNumber`, `eth_call`, `eth_getStorageAt`
 and (tests only) `eth_getLogs`.
 
 ```bash
@@ -306,9 +307,10 @@ $10,000 one, because the cost of selling $40,000 is bounded by the cost of selli
 $100,000 and never by the cost of selling $10,000. Rounding down would flatter the
 borrower with slippage from a trade a tenth the size.
 
-Measured live through the gate, $100,000 of wNVDAx at 50% LTV: the realisable value is
-$98,149.45 and the limit $49,074.72, where a mark-based lender would have extended
-$50,000. That ~$925 is the phantom credit statera exists to remove.
+One measurement through the gate, $100,000 of wNVDAx at 50% LTV: realisable value
+$98,149.45, limit $49,074.72, against the $50,000 a mark-based lender would have
+extended. That ~$925 is the phantom credit statera exists to remove. The figure moves
+with the book — the live page at the top of this file shows the current one.
 
 ## Keeper
 
