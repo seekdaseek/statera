@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>statera — what tokenized stock is actually worth on X Layer</title>
+<meta name="description" content="An independent mark, the realisable value at a stated size, and the gap between them. Published on X Layer mainnet every ten minutes.">
+<style>
+  :root{
+    --bg:#080b12; --bg2:#0b1019; --panel:#111827; --panel2:#151e2e;
+    --line:#1f2b3f; --line2:#27364e;
+    --ink:#eaf1fb; --mute:#8fa3bf; --dim:#62748f;
+    --cyan:#22d3ee; --violet:#818cf8; --green:#34d399; --amber:#fbbf24; --red:#fb7185;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:
+      radial-gradient(1100px 620px at 12% -8%, rgba(129,140,248,.16), transparent 60%),
+      radial-gradient(900px 520px at 92% 0%, rgba(34,211,238,.10), transparent 62%),
+      var(--bg);
+    color:var(--ink);
+    font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 20px 72px}
+
+  /* ---------- header ---------- */
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0 8px;flex-wrap:wrap}
+  .brand{display:flex;align-items:baseline;gap:11px}
+  .brand h1{margin:0;font-size:25px;letter-spacing:-.6px;font-weight:650}
+  .brand .dot{color:var(--cyan)}
+  .brand span.sub{color:var(--mute);font-size:13px}
+  .chainpill{
+    display:inline-flex;align-items:center;gap:8px;padding:6px 13px;border-radius:999px;
+    background:rgba(34,211,238,.09);border:1px solid rgba(34,211,238,.28);
+    color:#a8eef8;font-size:12.5px;font-weight:550;letter-spacing:.1px;
+  }
+  .live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.6);animation:p 2.4s infinite}
+  @keyframes p{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}70%{box-shadow:0 0 0 8px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+
+  /* ---------- hero ---------- */
+  .lede{margin:26px 0 8px;font-size:clamp(27px,4.3vw,42px);line-height:1.16;letter-spacing:-1.1px;font-weight:660;max-width:20ch}
+  .lede em{font-style:normal;color:var(--cyan)}
+  .lede .hole{color:var(--red)}
+  .sub{color:var(--mute);max-width:66ch;margin:0 0 26px;font-size:15.5px}
+
+  /* ---------- controls ---------- */
+  .controls{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin:0 0 20px}
+  .cgroup label{display:block;font-size:11px;letter-spacing:.9px;text-transform:uppercase;color:var(--dim);margin-bottom:8px;font-weight:600}
+  .chips{display:flex;gap:7px;flex-wrap:wrap}
+  .chip{
+    appearance:none;cursor:pointer;font:inherit;font-size:13.5px;font-weight:560;
+    padding:8px 15px;border-radius:999px;color:var(--mute);
+    background:var(--panel);border:1px solid var(--line);transition:.14s;
+  }
+  .chip:hover{border-color:var(--line2);color:var(--ink)}
+  .chip[aria-pressed="true"]{background:rgba(129,140,248,.15);border-color:rgba(129,140,248,.5);color:#cfd5ff}
+
+  /* ---------- stat row ---------- */
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:0 0 16px}
+  .stat{
+    background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--line);border-radius:15px;padding:18px 19px 17px;position:relative;overflow:hidden;
+  }
+  .stat::before{content:"";position:absolute;inset:0 auto auto 0;width:100%;height:2px;background:var(--edge,transparent);opacity:.85}
+  .stat .k{font-size:11.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);font-weight:640;margin-bottom:9px}
+  .stat .v{font:600 clamp(26px,3.3vw,34px)/1.05 var(--mono);letter-spacing:-1px;color:var(--val,var(--ink));font-variant-numeric:tabular-nums}
+  .stat .n{color:var(--mute);font-size:12.5px;margin-top:8px;min-height:18px}
+
+  /* ---------- matrix ---------- */
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px;padding:20px 20px 18px;margin:16px 0}
+  .card h2{margin:0 0 4px;font-size:16px;font-weight:640;letter-spacing:-.25px}
+  .card p.h{margin:0 0 16px;color:var(--mute);font-size:13.5px;max-width:70ch}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{text-align:right;padding:11px 10px;font-size:14px}
+  th{font-size:11px;letter-spacing:.85px;text-transform:uppercase;color:var(--dim);font-weight:640;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  tbody tr{border-bottom:1px solid rgba(31,43,63,.55)}
+  tbody tr:last-child{border-bottom:0}
+  td.sym{font-weight:600;letter-spacing:-.2px}
+  .gapcell{font-family:var(--mono);font-weight:600;font-size:14.5px;display:inline-block;padding:4px 10px;border-radius:7px}
+  .usd{font-family:var(--mono);color:var(--mute);font-size:12.5px;display:block;margin-top:2px;font-weight:500}
+
+  /* ---------- lender ---------- */
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .side{background:rgba(8,11,18,.5);border:1px solid var(--line);border-radius:13px;padding:16px 17px}
+  .side .k{font-size:11.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);font-weight:640;margin-bottom:10px}
+  .side .big{font:600 27px/1.1 var(--mono);letter-spacing:-.8px;font-variant-numeric:tabular-nums}
+  .side .note{color:var(--mute);font-size:12.5px;margin-top:9px}
+  .verdict{margin-top:14px;padding:13px 15px;border-radius:11px;background:rgba(251,113,133,.09);border:1px solid rgba(251,113,133,.3);font-size:14px;color:#ffd7dd}
+  .verdict b{color:#fff}
+
+  /* ---------- provenance ---------- */
+  .prov{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:16px}
+  .pv{background:rgba(8,11,18,.45);border:1px solid var(--line);border-radius:12px;padding:14px 15px}
+  .pv .k{font-size:10.5px;letter-spacing:.85px;text-transform:uppercase;color:var(--dim);font-weight:640;margin-bottom:7px}
+  .pv .v{font-family:var(--mono);font-size:15px;font-weight:600}
+  a{color:var(--cyan);text-decoration:none;border-bottom:1px solid rgba(34,211,238,.28)}
+  a:hover{border-bottom-color:var(--cyan)}
+  .addr{font-family:var(--mono);font-size:12px;color:var(--mute);word-break:break-all}
+  footer{margin-top:30px;padding-top:20px;border-top:1px solid var(--line);color:var(--dim);font-size:13px;display:flex;gap:18px;flex-wrap:wrap;justify-content:space-between}
+  .statuses{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .sbadge{font-size:11.5px;padding:4px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--mute)}
+  .err{background:rgba(251,113,133,.1);border:1px solid rgba(251,113,133,.35);color:#ffd7dd;padding:13px 16px;border-radius:12px;margin:16px 0;font-size:14px}
+  .skel{color:var(--dim)}
+  @media(max-width:860px){
+    .stats{grid-template-columns:1fr}
+    .two{grid-template-columns:1fr}
+    .prov{grid-template-columns:1fr 1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <h1>statera<span class="dot">.</span></h1>
+      <span class="sub">tokenized stock, priced at the size you actually hold</span>
+    </div>
+    <span class="chainpill"><span class="live-dot"></span> X Layer mainnet · chain 196</span>
+  </header>
+
+  <h2 class="lede" id="lede"><span class="skel">Reading the feed…</span></h2>
+  <p class="sub">A lending market marks collateral at an oracle price. That price is what one share trades for, not what your
+  position returns when it is sold. <strong>statera publishes both, at a stated exit size, straight to X Layer.</strong>
+  Every number below is an <code>eth_call</code> made by your browser — open devtools and watch it.</p>
+
+  <div id="error"></div>
+
+  <div class="controls">
+    <div class="cgroup">
+      <label>Asset</label>
+      <div class="chips" id="assets"></div>
+    </div>
+    <div class="cgroup">
+      <label>Exit size</label>
+      <div class="chips" id="tiers"></div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat" style="--edge:linear-gradient(90deg,var(--violet),transparent)">
+      <div class="k">Mark — what the oracle says</div>
+      <div class="v" id="s-mark">—</div>
+      <div class="n" id="s-mark-n"></div>
+    </div>
+    <div class="stat" style="--edge:linear-gradient(90deg,var(--cyan),transparent)">
+      <div class="k">Realisable — what the book returns</div>
+      <div class="v" id="s-real">—</div>
+      <div class="n" id="s-real-n"></div>
+    </div>
+    <div class="stat" id="s-gap-card" style="--edge:linear-gradient(90deg,var(--red),transparent)">
+      <div class="k">The gap</div>
+      <div class="v" id="s-gap">—</div>
+      <div class="n" id="s-gap-n"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>The same asset, three different truths</h2>
+    <p class="h">One price, one second, three exit sizes. A mark is a single number and cannot say this;
+      the cost of leaving is a function of how much you are leaving with.</p>
+    <table>
+      <thead><tr><th>Asset</th><th>$1,000 out</th><th>$10,000 out</th><th>$100,000 out</th></tr></thead>
+      <tbody id="matrix"></tbody>
+    </table>
+    <div class="statuses" id="statuses"></div>
+  </div>
+
+  <div class="card">
+    <h2>What this changes for a lender</h2>
+    <p class="h">Read live from <code>CollateralGate</code> on X Layer at 75% LTV. The left number is what a mark-based
+      lender extends. The right is what the same contract allows once the exit is priced.</p>
+    <div class="two">
+      <div class="side">
+        <div class="k">Mark-based limit</div>
+        <div class="big" id="naive" style="color:var(--mute)">—</div>
+        <div class="note">face value × 75%, the way most lending markets size a position</div>
+      </div>
+      <div class="side">
+        <div class="k">statera limit</div>
+        <div class="big" id="gated" style="color:var(--cyan)">—</div>
+        <div class="note" id="gated-n">realisable value × 75%</div>
+      </div>
+    </div>
+    <div class="verdict" id="verdict"></div>
+  </div>
+
+  <div class="prov">
+    <div class="pv"><div class="k">Runs published</div><div class="v" id="p-runs">—</div></div>
+    <div class="pv"><div class="k">Last post</div><div class="v" id="p-age">—</div></div>
+    <div class="pv"><div class="k">Engine block</div><div class="v" id="p-block">—</div></div>
+    <div class="pv"><div class="k">Rows this run</div><div class="v" id="p-rows">—</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Contracts</h2>
+    <p class="h">Immutable, no owner, no upgrade path. The publisher is fixed at deploy and cannot be repointed —
+      a feed a stranger can quietly take over is not worth reading.</p>
+    <table>
+      <thead><tr><th>Contract</th><th style="text-align:left">Address</th></tr></thead>
+      <tbody>
+        <tr><td class="sym">StateraFeed</td><td style="text-align:left"><a class="addr" id="lnk-feed" target="_blank" rel="noopener"></a></td></tr>
+        <tr><td class="sym">CollateralGate</td><td style="text-align:left"><a class="addr" id="lnk-gate" target="_blank" rel="noopener"></a></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <span>statera — <a href="https://github.com/seekdaseek/statera" target="_blank" rel="noopener">github.com/seekdaseek/statera</a> · MIT</span>
+    <span id="foot-note"></span>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var RPC   = "https://rpc.xlayer.tech";
+  var FEED  = "0x879d9a5d1Fa688DDf94b13361490746Faf8b784C";
+  var GATE  = "0x12c23e1cce2Ee3246a3161852d2CA7D6cFe4B9DA";
+  var SCAN  = "https://www.oklink.com/x-layer/address/";
+  var LTV   = 7500;                 // basis points
+  var FORM  = 1;                    // 1 = Wrapped: the form that actually trades
+  var TIERS = [1000, 10000, 100000];
+  var ASSETS = [
+    { sym:"TSLAx", name:"Tesla",  addr:"0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0" },
+    { sym:"NVDAx", name:"Nvidia", addr:"0xc845b2894dbddd03858fd2d643b4ef725fe0849d" },
+    { sym:"SPYx",  name:"S&P 500",addr:"0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48" }
+  ];
+  var SEL = { sym:"TSLAx", tier:100000 };
+  var STATUS = ["Unmeasured","Measured","Absent"];
+  var REFUSAL = ["","unknown series","no tier covers that amount","not measured",
+                 "not sellable at that size","stale","bad parameters","a smaller tier is not sellable"];
+  var cache = {};
+
+  function $(id){ return document.getElementById(id); }
+  function pad(x){ return x.replace(/^0x/,"").toLowerCase().padStart(64,"0"); }
+  function hx(n){ return n.toString(16); }
+  function word(hex,i){ return hex.replace(/^0x/,"").substr(i*64,64); }
+  function U(hex,i){ return BigInt("0x"+word(hex,i)); }
+  function I(hex,i){ var b=U(hex,i), m=1n<<255n; return b>=m ? b-(1n<<256n) : b; }
+  function usd(n){ return "$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function usd0(n){ return "$"+n.toLocaleString("en-US",{maximumFractionDigits:0}); }
+
+  function rpc(to,data){
+    return fetch(RPC,{
+      method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:to,data:data},"latest"]})
+    }).then(function(r){ return r.json(); }).then(function(j){
+      if(j.error) throw new Error(j.error.message||"rpc error");
+      return j.result;
+    });
+  }
+
+  // ---- reads -------------------------------------------------------------
+  function readRow(addr,tier){
+    return rpc(FEED,"0xe4c8e0a1"+pad(addr)+pad(hx(FORM))+pad(hx(tier))).then(function(h){
+      return {
+        mark: Number(U(h,0))/1e6,
+        real: Number(U(h,1))/1e6,
+        fill: Number(U(h,2))/1e6,
+        gap:  Number(I(h,3)),
+        status: Number(U(h,4)),
+        block: Number(U(h,5)),
+        pub:   Number(U(h,6))
+      };
+    });
+  }
+  function readGate(addr,tier){
+    var amount=(BigInt(tier)*1000000n).toString(16);
+    return rpc(GATE,"0x814909fb"+pad(addr)+pad(hx(FORM))+pad(amount)+pad(hx(LTV))).then(function(h){
+      return { refusal:Number(U(h,0)), limit:Number(U(h,1))/1e6, tier:Number(U(h,2)), fill:Number(U(h,3))/1e6 };
+    });
+  }
+
+  // ---- paint -------------------------------------------------------------
+  function gapColor(bps){
+    if(bps >= -5)  return "var(--green)";
+    if(bps >= -50) return "var(--amber)";
+    return "var(--red)";
+  }
+  function gapChipStyle(bps){
+    var c=gapColor(bps);
+    var bg = c==="var(--green)" ? "rgba(52,211,153,.12)"
+           : c==="var(--amber)" ? "rgba(251,191,36,.12)"
+           : "rgba(251,113,133,.13)";
+    return "color:"+c+";background:"+bg;
+  }
+  function fmtGap(bps){ return (bps>0?"+":"")+bps.toFixed(0)+" bps"; }
+
+  function paintChips(){
+    $("assets").innerHTML = ASSETS.map(function(a){
+      return '<button class="chip" data-sym="'+a.sym+'" aria-pressed="'+(a.sym===SEL.sym)+'">'+a.sym+'</button>';
+    }).join("");
+    $("tiers").innerHTML = TIERS.map(function(t){
+      return '<button class="chip" data-tier="'+t+'" aria-pressed="'+(t===SEL.tier)+'">'+usd0(t)+'</button>';
+    }).join("");
+    Array.prototype.forEach.call($("assets").children,function(b){
+      b.onclick=function(){ SEL.sym=b.dataset.sym; paintChips(); paintSelection(); };
+    });
+    Array.prototype.forEach.call($("tiers").children,function(b){
+      b.onclick=function(){ SEL.tier=+b.dataset.tier; paintChips(); paintSelection(); };
+    });
+  }
+
+  function paintSelection(){
+    var a=ASSETS.filter(function(x){return x.sym===SEL.sym;})[0];
+    var r=cache[SEL.sym+":"+SEL.tier];
+    if(!r) return;
+    var loss=SEL.tier-r.real;
+
+    $("s-mark").textContent = usd(r.mark);
+    $("s-mark-n").textContent = "per "+a.sym+" share, from OKX spot";
+
+    $("s-real").textContent = usd(r.real);
+    $("s-real-n").textContent = "proceeds of selling "+usd0(SEL.tier)+" into the live book";
+
+    var g=$("s-gap"), card=$("s-gap-card");
+    g.textContent = fmtGap(r.gap);
+    g.style.color = gapColor(r.gap);
+    card.style.setProperty("--edge","linear-gradient(90deg,"+gapColor(r.gap)+",transparent)");
+    $("s-gap-n").textContent = loss>0
+      ? usd(loss)+" of the position does not survive the exit"
+      : "the book pays at or above the mark at this size";
+
+    $("lede").innerHTML = loss>0
+      ? 'At <em>'+usd0(SEL.tier)+'</em>, '+a.sym+' returns <span class="hole">'+usd0(r.real)+'</span>.'
+      : 'At <em>'+usd0(SEL.tier)+'</em>, '+a.sym+' returns the full <em>'+usd0(r.real)+'</em>.';
+
+    // lender panel
+    var naive=SEL.tier*LTV/10000;
+    $("naive").textContent=usd(naive);
+    readGate(a.addr,SEL.tier).then(function(gt){
+      if(gt.refusal!==0){
+        $("gated").textContent="refused";
+        $("gated").style.color="var(--red)";
+        $("gated-n").textContent="reason: "+(REFUSAL[gt.refusal]||"refused");
+        $("verdict").innerHTML="<b>The gate refuses rather than guessing.</b> "+
+          "An unmeasured or unsellable position is not worth zero, it is worth <b>unknown</b> — and unknown is not something to lend against.";
+        return;
+      }
+      $("gated").textContent=usd(gt.limit);
+      $("gated").style.color="var(--cyan)";
+      $("gated-n").textContent="realisable value × 75%, tier "+usd0(gt.tier)+" consulted";
+      var d=naive-gt.limit;
+      $("verdict").innerHTML = d>0.5
+        ? "<b>"+usd(d)+"</b> of credit the mark would have extended against value the book cannot return. On one position, at one size, right now."
+        : "At this size the two agree. That is the useful answer too — the gap is a measurement, not a grievance.";
+    }).catch(function(e){
+      $("gated").textContent="—"; $("verdict").textContent="Gate read failed: "+e.message;
+    });
+  }
+
+  function paintMatrix(){
+    $("matrix").innerHTML = ASSETS.map(function(a){
+      var cells = TIERS.map(function(t){
+        var r=cache[a.sym+":"+t];
+        if(!r) return "<td>—</td>";
+        if(r.status!==1) return '<td><span class="gapcell" style="color:var(--mute);background:rgba(98,116,143,.12)">'+STATUS[r.status]+"</span></td>";
+        var loss=t-r.real;
+        return '<td><span class="gapcell" style="'+gapChipStyle(r.gap)+'">'+fmtGap(r.gap)+"</span>"+
+               '<span class="usd">'+(loss>0?"−"+usd(loss):"+"+usd(-loss))+"</span></td>";
+      }).join("");
+      return '<tr><td class="sym">'+a.sym+' <span style="color:var(--dim);font-weight:400">'+a.name+"</span></td>"+cells+"</tr>";
+    }).join("");
+
+    var counts={};
+    Object.keys(cache).forEach(function(k){ var s=STATUS[cache[k].status]; counts[s]=(counts[s]||0)+1; });
+    $("statuses").innerHTML = Object.keys(counts).map(function(k){
+      return '<span class="sbadge">'+counts[k]+" "+k+"</span>";
+    }).join("") + '<span class="sbadge">measured / absent / unmeasured are never merged</span>';
+  }
+
+  function paintProvenance(runs,pub,block,rows){
+    $("p-runs").textContent=runs;
+    var mins=Math.round((Date.now()-pub*1000)/60000);
+    $("p-age").textContent = mins<60 ? mins+" min ago" : (mins/60).toFixed(1)+" h ago";
+    $("p-block").textContent=block.toLocaleString("en-US");
+    $("p-rows").textContent=rows;
+    $("foot-note").textContent="read live from X Layer at "+new Date().toISOString().slice(11,16)+" UTC";
+  }
+
+  function fail(msg){
+    $("error").innerHTML='<div class="err"><b>Could not reach X Layer.</b> '+msg+
+      ' The contracts are still live — the addresses below are readable on any X Layer RPC or explorer.</div>';
+    $("lede").innerHTML='Three numbers for tokenized stock: the mark, the <em>realisable</em> value, and the gap.';
+  }
+
+  // ---- boot --------------------------------------------------------------
+  $("lnk-feed").textContent=FEED; $("lnk-feed").href=SCAN+FEED;
+  $("lnk-gate").textContent=GATE; $("lnk-gate").href=SCAN+GATE;
+  paintChips();
+
+  var jobs=[];
+  ASSETS.forEach(function(a){ TIERS.forEach(function(t){
+    jobs.push(readRow(a.addr,t).then(function(r){ cache[a.sym+":"+t]=r; }));
+  });});
+  jobs.push(rpc(FEED,"0x9196b700"));   // runCount()
+  jobs.push(rpc(FEED,"0x065491a5"));   // lastPublishedAt()
+  jobs.push(rpc(FEED,"0x1f0f0300"));   // lastEngineBlock()
+
+  Promise.all(jobs).then(function(res){
+    var n=res.length;
+    paintProvenance(Number(U(res[n-3],0)), Number(U(res[n-2],0)), Number(U(res[n-1],0)), Object.keys(cache).length);
+    paintMatrix();
+    paintSelection();
+  }).catch(function(e){ fail(e.message||String(e)); });
+})();
+</script>
+</body>
+</html>
