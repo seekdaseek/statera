@@ -216,8 +216,8 @@ of them touch mainnet or spend OKB.
 
 ```bash
 export PATH="$HOME/.foundry/bin:$PATH"
-forge test                                   # 85 Solidity tests
-forge test --fork-url https://rpc.xlayer.tech # the same 85, against real chain state
+forge test                                   # 104 Solidity tests, 3 suites
+forge test --fork-url https://rpc.xlayer.tech # the same 104, against real chain state
 npm test                                     # 94 TypeScript tests, 6 of them live RPC
 node script/fork-e2e.mjs                     # live engine -> forked feed -> gate
 node script/gas-estimate.mjs                 # measured cost, priced in OKB and USD
